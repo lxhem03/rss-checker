@@ -18,9 +18,6 @@ env/
 *.session
 *.session-journal
 
-# Environment variables
-.env
-
 # Downloads temp dir
 /tmp/downloads/
 
