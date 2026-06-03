@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import motor.motor_asyncio as motor
+from motor.motor_asyncio import AsyncIOMotorClient
 
 from config import MONGO_URI, MONGO_DB
 
@@ -19,33 +19,48 @@ logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self) -> None:
-        self._client: Optional[motor.AsyncIOMotorClient] = None
+        self._client: Optional[AsyncIOMotorClient] = None
         self.feeds = None
         self.downloads = None
 
     async def connect(self) -> None:
-        self._client = motor.AsyncIOMotorClient(MONGO_URI)
+        # tlsAllowInvalidCertificates=False is the safe default for Atlas.
+        # serverSelectionTimeoutMS=10000 gives a clear error fast instead of
+        # hanging for 30 s if credentials / URI are wrong.
+        self._client = AsyncIOMotorClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=10_000,
+        )
+
+        # Force an actual round-trip so we fail loudly here (not later)
+        # rather than crashing silently mid-operation.
+        await self._client.admin.command("ping")
+        logger.info("MongoDB Atlas ping OK.")
+
         db = self._client[MONGO_DB]
-        self.feeds = db["rss_feeds"]
+        self.feeds     = db["rss_feeds"]
         self.downloads = db["downloads"]
 
-        # Indexes
+        # Indexes — safe to call even if they already exist
         await self.feeds.create_index("feed_url")
-        await self.downloads.create_index([("title", 1), ("episode_key", 1)], unique=True)
-        logger.info("MongoDB connected.")
+        await self.feeds.create_index("user_id")
+        await self.downloads.create_index(
+            [("title", 1), ("episode_key", 1)], unique=True
+        )
+        logger.info("MongoDB connected and indexes ensured.")
 
     # ── RSS Feeds ──────────────────────────────────────────────────────────
 
     async def add_feed(self, user_id: int, feed_url: str, title: str) -> Dict[str, Any]:
-        """Insert or update a feed entry. Returns the document."""
+        """Insert a new feed or return the existing one."""
         existing = await self.feeds.find_one({"feed_url": feed_url, "user_id": user_id})
         if existing:
             return existing
         doc = {
-            "feed_url": feed_url,
-            "title": title,
-            "user_id": user_id,
-            "added_at": datetime.now(timezone.utc),
+            "feed_url":   feed_url,
+            "title":      title,
+            "user_id":    user_id,
+            "added_at":   datetime.now(timezone.utc),
             "seen_guids": [],
         }
         await self.feeds.insert_one(doc)
@@ -77,11 +92,11 @@ class Database:
         try:
             await self.downloads.insert_one(
                 {
-                    "title": title,
+                    "title":       title,
                     "episode_key": episode_key,
-                    "user_id": user_id,
+                    "user_id":     user_id,
                     "finished_at": datetime.now(timezone.utc),
                 }
             )
         except Exception:
-            pass  # duplicate key – already stored
+            pass  # duplicate key — already stored, that's fine

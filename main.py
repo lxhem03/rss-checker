@@ -22,9 +22,20 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 async def main() -> None:
+    # ── Database first — fail fast if URI is wrong ─────────────────────────
     db = Database()
-    await db.connect()
+    try:
+        await db.connect()
+    except Exception as exc:
+        logger.critical(
+            "Could not connect to MongoDB: %s\n"
+            "Check that MONGO_URI is set correctly in your Heroku config vars.\n"
+            "It should look like: mongodb+srv://user:pass@cluster.mongodb.net/",
+            exc,
+        )
+        raise SystemExit(1)
 
+    # ── Pyrogram client ────────────────────────────────────────────────────
     app = Client(
         name="rss_bot",
         api_id=API_ID,
@@ -34,24 +45,19 @@ async def main() -> None:
         parse_mode=ParseMode.HTML,
     )
 
-    # Attach shared objects to app so handlers can reach them
     app.db = db
-
-    # DownloadManager needs the client reference; we create it before starting
-    # and re-attach after start so it holds the live client.
-    app.download_manager = None  # placeholder
+    app.download_manager = None  # filled after client starts
 
     register_handlers(app)
 
     async with app:
-        # Now the client is running — attach real manager
         app.download_manager = DownloadManager(app)
 
         rss_task = RssCheckerTask(app, db)
         await rss_task.start()
 
         logger.info("✅ Bot is live.")
-        await asyncio.Event().wait()   # block forever
+        await asyncio.Event().wait()   # run forever
 
 
 if __name__ == "__main__":
