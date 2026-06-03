@@ -1,16 +1,12 @@
 """
 Rename → extract metadata → screenshot → upload to user PM.
-Progress updates are edited into a status message in AUTH_GROUP.
 
-Caption format: just the filename stem — e.g. "Re:Zero - S03E04"
-
-FloodWait mitigation
-────────────────────
-Upload progress is only edited when BOTH of these are true:
-  • At least _UPLOAD_MIN_INTERVAL seconds have passed since last edit
-  • Progress has moved at least _UPLOAD_PCT_STEP percent since last edit
-Additionally, we skip the edit entirely if the text would be identical
-to the last one sent (stalled upload at the same %).
+Key design points
+─────────────────
+• Each call gets its OWN thumbnail subdirectory (thumb_{stem}/) so parallel
+  or sequential calls never collide on the same thumb.jpg path.
+• FloodWait mitigation: progress edits fire only when ≥8 s have elapsed
+  OR ≥10 % progress has been made, AND the text has actually changed.
 """
 from __future__ import annotations
 
@@ -18,7 +14,6 @@ import logging
 import os
 import shutil
 import time
-from typing import Optional
 
 from pyrogram import Client
 from pyrogram.types import Message
@@ -28,12 +23,12 @@ from bot.utils.ffmpeg import get_video_metadata, take_screenshot
 
 logger = logging.getLogger(__name__)
 
-_UPLOAD_MIN_INTERVAL = 8    # seconds — never edit faster than this
-_UPLOAD_PCT_STEP     = 10   # percent — also edit on every N% milestone
+_UPLOAD_MIN_INTERVAL = 8    # seconds between edits
+_UPLOAD_PCT_STEP     = 10   # percent milestone that also triggers an edit
 
 
 def _make_caption(new_name: str) -> str:
-    """Just the stem: 'Re:Zero - S03E04'  (no extension, no extra info)."""
+    """'Re:Zero - S03E04'  — stem only, no extension, no extra metadata."""
     return os.path.splitext(new_name)[0]
 
 
@@ -44,77 +39,78 @@ async def upload_file(
     requesting_user_id: int,
     status_message: Message,
 ) -> None:
-    work_dir = os.path.dirname(video_path)
+    # Each video gets its own working subdir so thumbnails never collide
+    base_dir  = os.path.dirname(video_path)
+    stem      = os.path.splitext(os.path.basename(video_path))[0]
+    thumb_dir = os.path.join(base_dir, f"_thumb_{stem}")
+    os.makedirs(thumb_dir, exist_ok=True)
 
-    # ── 1. Rename ─────────────────────────────────────────────────────────
-    new_name = build_filename(title, os.path.basename(video_path))
-    new_path = os.path.join(work_dir, new_name)
-    if os.path.abspath(video_path) != os.path.abspath(new_path):
-        shutil.move(video_path, new_path)
-    video_path = new_path
-
-    await _safe_edit(
-        status_message,
-        f"🎬 <b>Processing:</b> <code>{new_name}</code>\n⏳ Extracting video metadata…",
-    )
-
-    # ── 2. Metadata ───────────────────────────────────────────────────────
-    duration, width, height = await get_video_metadata(video_path)
-    if duration <= 0:
-        logger.warning("Duration unknown for '%s' — no seek bar.", new_name)
-
-    # ── 3. Thumbnail ──────────────────────────────────────────────────────
-    thumb_path = await take_screenshot(video_path, work_dir, duration)
-
-    await _safe_edit(
-        status_message,
-        f"📤 <b>Uploading:</b> <code>{new_name}</code>\n⬆️ Starting…",
-    )
-
-    # ── 4. Throttled upload progress ──────────────────────────────────────
-    upload_start    = time.monotonic()
-    last_edit_t     = [0.0]
-    last_edit_pct   = [-1.0]   # -1 so the very first update always fires
-    last_edit_text  = [""]
-
-    async def _progress(current: int, total: int) -> None:
-        now  = time.monotonic()
-        pct  = current / total * 100 if total else 0
-        elapsed = int(now - upload_start)
-
-        time_ok = (now - last_edit_t[0]) >= _UPLOAD_MIN_INTERVAL
-        pct_ok  = (pct - last_edit_pct[0]) >= _UPLOAD_PCT_STEP
-
-        if not (time_ok or pct_ok):
-            return
-
-        bar  = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-        text = (
-            f"📤 <b>Uploading:</b> <code>{new_name}</code>\n"
-            f"{bar} {pct:.1f}%\n"
-            f"{_human_size(current)} / {_human_size(total)}"
-            f"  |  🕐 {_fmt_elapsed(elapsed)}"
-        )
-
-        # Skip if nothing changed (avoids editing identical messages)
-        if text == last_edit_text[0]:
-            return
-
-        last_edit_t[0]    = now
-        last_edit_pct[0]  = pct
-        last_edit_text[0] = text
-        await _safe_edit(status_message, text)
-
-    # ── 5. Send to user PM ────────────────────────────────────────────────
-    caption = _make_caption(new_name)
+    thumb_path = None
 
     try:
+        # ── 1. Rename ─────────────────────────────────────────────────────
+        new_name = build_filename(title, os.path.basename(video_path))
+        new_path = os.path.join(base_dir, new_name)
+        if os.path.abspath(video_path) != os.path.abspath(new_path):
+            shutil.move(video_path, new_path)
+        video_path = new_path
+
+        await _safe_edit(
+            status_message,
+            f"🎬 <b>Processing:</b> <code>{new_name}</code>\n⏳ Extracting metadata…",
+        )
+
+        # ── 2. Metadata ───────────────────────────────────────────────────
+        duration, width, height = await get_video_metadata(video_path)
+        if duration <= 0:
+            logger.warning("Duration unknown for '%s' — no seek bar.", new_name)
+
+        # ── 3. Thumbnail — written into thumb_dir, never shared ───────────
+        thumb_path = await take_screenshot(video_path, thumb_dir, duration)
+
+        await _safe_edit(
+            status_message,
+            f"📤 <b>Uploading:</b> <code>{new_name}</code>\n⬆️ Starting…",
+        )
+
+        # ── 4. Throttled progress callback ────────────────────────────────
+        upload_start   = time.monotonic()
+        last_edit_t    = [0.0]
+        last_edit_pct  = [-1.0]
+        last_edit_text = [""]
+
+        async def _progress(current: int, total: int) -> None:
+            now     = time.monotonic()
+            pct     = current / total * 100 if total else 0
+            elapsed = int(now - upload_start)
+
+            time_ok = (now - last_edit_t[0]) >= _UPLOAD_MIN_INTERVAL
+            pct_ok  = (pct - last_edit_pct[0]) >= _UPLOAD_PCT_STEP
+            if not (time_ok or pct_ok):
+                return
+
+            bar  = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+            text = (
+                f"📤 <b>Uploading:</b> <code>{new_name}</code>\n"
+                f"{bar} {pct:.1f}%\n"
+                f"{_human_size(current)} / {_human_size(total)}"
+                f"  |  🕐 {_fmt_elapsed(elapsed)}"
+            )
+            if text == last_edit_text[0]:
+                return
+
+            last_edit_t[0]    = now
+            last_edit_pct[0]  = pct
+            last_edit_text[0] = text
+            await _safe_edit(status_message, text)
+
+        # ── 5. Send to user PM ────────────────────────────────────────────
         send_kwargs = dict(
             chat_id=requesting_user_id,
             video=video_path,
-            caption=caption,
+            caption=_make_caption(new_name),
             duration=max(0, int(duration)),
-            width=width  if width  > 0 else None,
+            width=width   if width  > 0 else None,
             height=height if height > 0 else None,
             thumb=thumb_path if thumb_path and os.path.exists(thumb_path) else None,
             supports_streaming=True,
@@ -129,7 +125,7 @@ async def upload_file(
             f"✅ <b>Sent to PM:</b> <code>{new_name}</code>",
         )
         logger.info(
-            "Uploaded '%s' (duration=%ds, %dx%d) → user %d",
+            "Uploaded '%s' (dur=%ds %dx%d) → user %d",
             new_name, duration, width, height, requesting_user_id,
         )
 
@@ -139,9 +135,9 @@ async def upload_file(
         raise
 
     finally:
+        # Always clean up this file's private thumb directory
+        shutil.rmtree(thumb_dir, ignore_errors=True)
         _unlink(video_path)
-        if thumb_path:
-            _unlink(thumb_path)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

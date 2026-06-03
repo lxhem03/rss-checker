@@ -187,10 +187,17 @@ class DownloadManager:
                     cancelled_event=job.cancelled,
                 )
 
-                video_files = sorted([
+                # Sort by episode number so uploads go E01 → E02 → … in order
+                raw_videos = [
                     f for f in all_files
                     if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
-                ])
+                ]
+
+                def _ep_sort_key(path: str):
+                    _, ep = extract_season_episode(os.path.basename(path))
+                    return ep if ep is not None else 9999
+
+                video_files = sorted(raw_videos, key=_ep_sort_key)
 
                 if not video_files:
                     await self._safe_edit(
@@ -202,37 +209,41 @@ class DownloadManager:
                 await self._safe_edit(
                     status_msg,
                     f"✅ <b>Download complete!</b> <code>{job.id}</code>\n"
-                    f"📁 {len(video_files)} video file(s) found.\n"
-                    f"📤 Uploading to your PM…",
+                    f"📁 {len(video_files)} video file(s) — uploading in order…",
                 )
 
                 db = client.db
-                upload_tasks = []
+                uploaded = 0
+                skipped  = 0
 
+                # Sequential loop — guarantees episode order and isolates
+                # each thumbnail in its own subdir (no collisions)
                 for vf in video_files:
                     _, episode = extract_season_episode(os.path.basename(vf))
-                    ep_key = str(episode) if episode else os.path.basename(vf)
+                    ep_key = str(episode) if episode is not None else os.path.basename(vf)
 
-                    # ── Dedup: RSS only ───────────────────────────────────
-                    # /download always proceeds; RSS skips already-done eps
+                    # Dedup: RSS only — /download always proceeds
                     if job.from_rss and await db.is_duplicate(job.title, ep_key):
-                        logger.info("RSS dedup skip: %s %s", job.title, ep_key)
+                        logger.info("RSS dedup skip: %s ep=%s", job.title, ep_key)
+                        skipped += 1
                         continue
 
                     file_status = await client.send_message(
                         chat_id=status_msg.chat.id,
                         text=f"📤 Uploading: <code>{os.path.basename(vf)}</code>",
                     )
-                    upload_tasks.append(
-                        self._upload_one(client, vf, job, ep_key, file_status)
-                    )
+                    await self._upload_one(client, vf, job, ep_key, file_status)
+                    uploaded += 1
 
-                if upload_tasks:
-                    await asyncio.gather(*upload_tasks, return_exceptions=True)
-                elif job.from_rss:
+                if uploaded == 0 and job.from_rss:
                     await self._safe_edit(
                         status_msg,
-                        f"ℹ️ All episodes in this torrent were already uploaded. Skipped.",
+                        f"ℹ️ All {skipped} episode(s) already uploaded. Skipped.",
+                    )
+                elif skipped:
+                    await self._safe_edit(
+                        status_msg,
+                        f"✅ Done — {uploaded} uploaded, {skipped} already existed (skipped).",
                     )
 
             except asyncio.CancelledError:
