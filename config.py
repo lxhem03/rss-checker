@@ -58,18 +58,55 @@ RSS_CHECK_INTERVAL: int = max(60, min(300, int(os.environ.get("RSS_CHECK_INTERVA
 #  Each pattern must have named groups: season (optional) and episode
 # ─────────────────────────────────────────
 SEASON_EPISODE_PATTERNS: List[re.Pattern] = [
-    # S01E01 / S1E1
-    re.compile(r"[Ss](?P<season>\d{1,2})[Ee](?P<episode>\d{2,3})"),
-    # 1x01
-    re.compile(r"(?P<season>\d{1,2})[xX](?P<episode>\d{2,3})"),
-    # Season 1 Episode 1
-    re.compile(r"[Ss]eason\s*(?P<season>\d{1,2})\s*[Ee]pisode\s*(?P<episode>\d{2,3})"),
-    # [12] at end of filename (episode only, no season)
-    re.compile(r"\[(?P<episode>\d{2,3})\]"),
-    # - 12 - (episode surrounded by dashes/spaces, no season)
-    re.compile(r"[\s\-_](?P<episode>\d{2,3})[\s\-_\[]"),
-    # E12 / EP12
-    re.compile(r"[Ee][Pp]?(?P<episode>\d{2,3})"),
+
+    # S01.E02 / S01-E02 / S01E11 (fixed)
+    (re.compile(r'[Ss](\d{1,2})[.\- _]*[Ee](\d{1,3})'),
+     ('season', 'episode')),
+
+    # Season 1 Episode 2 (full words)
+    (re.compile(r'Season[._\s]+(\d{1,2})[._\s]+Episode[._\s]+(\d{1,3})', re.IGNORECASE),
+     ('season', 'episode')),
+
+    # S1 Ep2 (mixed short words)
+    (re.compile(r'[Ss](\d{1,2})[._\s]+[Ee]p?[._\s]?(\d{1,3})'),
+     ('season', 'episode')),
+
+    # Season-1_Ep-02 type messy formats
+    (re.compile(r'Season[._\-\s]*(\d{1,2})[._\-\s]*Ep(?:isode)?[._\-\s]*(\d{1,3})', re.IGNORECASE),
+     ('season', 'episode')),
+
+    # New pattern for: S02 - 05, S01 - 12, Demon Slayer S02 - 05 style
+    (re.compile(r'[Ss](\d{1,2})[\s._-]*[-–—]?[\s._]*(\d{1,3})', re.IGNORECASE),
+     ('season', 'episode')),
+
+    # One Punch man 3 - 12 
+    (re.compile(r'[\s._-](\d{1,2})[\s._-]+(\d{1,3})(?=\.[^.]+$)'),
+     ('season', 'episode')),
+
+    # Title - 12 (Dual-1080p...) style   ← ADD THIS
+    (re.compile(r'[\s-]+\b(\d{1,3})\b\s*(?=\()', re.IGNORECASE),
+     ('episode',)),
+
+    # Ep123, Episode 123, ep.123  (require "Ep" or "Episode", not just "e")
+    (re.compile(r'(?i)\b(?:ep|episode)[._\s-]*(\d{1,4})\b'),
+     ('episode',)),
+
+    # E123 / E 123 / E-123 / E_123  (require word boundary or separator)
+    (re.compile(r'(?i)\b[Ee][._\s-]?(\d{1,4})\b'),
+     ('episode',)),
+
+    # Season as ordinal (2nd, 3rd) followed by episode number: 2nd_Season_03, 3rd_Season_02
+    (re.compile(r'(\d+)(?:st|nd|rd|th)[._\s]*Season[._\s]*(\d{1,3})', re.IGNORECASE),
+     ('season', 'episode')),
+
+    # Episode at the very beginning: 003_ or 12. or 001 -
+    (re.compile(r'^(\d{2,4})(?=[._\-\s])'),
+     ('episode',)),
+
+    # Absolute episode numbers (anime style) - stricter version
+    # Only standalone numbers, not part of words like "me123c"
+    (re.compile(r'(?<!\w)(\d{2,4})(?!\w)'),
+     ('episode',)),
 ]
 
 # ─────────────────────────────────────────
