@@ -2,10 +2,15 @@
 Rename → extract metadata → screenshot → upload to user PM.
 Progress updates are edited into a status message in AUTH_GROUP.
 
-Caption format (clean, no filesize/duration clutter):
-    {Title} - S01E03
-    or
-    {Title} - E03
+Caption format: just the filename stem — e.g. "Re:Zero - S03E04"
+
+FloodWait mitigation
+────────────────────
+Upload progress is only edited when BOTH of these are true:
+  • At least _UPLOAD_MIN_INTERVAL seconds have passed since last edit
+  • Progress has moved at least _UPLOAD_PCT_STEP percent since last edit
+Additionally, we skip the edit entirely if the text would be identical
+to the last one sent (stalled upload at the same %).
 """
 from __future__ import annotations
 
@@ -18,19 +23,17 @@ from typing import Optional
 from pyrogram import Client
 from pyrogram.types import Message
 
-from bot.utils.episode import build_filename, extract_season_episode
+from bot.utils.episode import build_filename
 from bot.utils.ffmpeg import get_video_metadata, take_screenshot
 
 logger = logging.getLogger(__name__)
 
-_EDIT_INTERVAL = 4  # minimum seconds between progress-message edits
+_UPLOAD_MIN_INTERVAL = 8    # seconds — never edit faster than this
+_UPLOAD_PCT_STEP     = 10   # percent — also edit on every N% milestone
 
 
 def _make_caption(new_name: str) -> str:
-    """
-    Return a clean caption: just the bare filename stem (no extension).
-    e.g. "Re:Zero - S03E04"
-    """
+    """Just the stem: 'Re:Zero - S03E04'  (no extension, no extra info)."""
     return os.path.splitext(new_name)[0]
 
 
@@ -55,43 +58,54 @@ async def upload_file(
         f"🎬 <b>Processing:</b> <code>{new_name}</code>\n⏳ Extracting video metadata…",
     )
 
-    # ── 2. Metadata (duration + dimensions) ──────────────────────────────
+    # ── 2. Metadata ───────────────────────────────────────────────────────
     duration, width, height = await get_video_metadata(video_path)
-
     if duration <= 0:
-        logger.warning(
-            "Duration unknown for '%s' — video will upload without seek bar.", new_name
-        )
+        logger.warning("Duration unknown for '%s' — no seek bar.", new_name)
 
-    # ── 3. Screenshot thumbnail ───────────────────────────────────────────
+    # ── 3. Thumbnail ──────────────────────────────────────────────────────
     thumb_path = await take_screenshot(video_path, work_dir, duration)
 
-    # ── 4. Status update ──────────────────────────────────────────────────
-    file_size = os.path.getsize(video_path)
     await _safe_edit(
         status_message,
         f"📤 <b>Uploading:</b> <code>{new_name}</code>\n⬆️ Starting…",
     )
 
-    last_edit = time.monotonic()
+    # ── 4. Throttled upload progress ──────────────────────────────────────
+    upload_start    = time.monotonic()
+    last_edit_t     = [0.0]
+    last_edit_pct   = [-1.0]   # -1 so the very first update always fires
+    last_edit_text  = [""]
 
     async def _progress(current: int, total: int) -> None:
-        nonlocal last_edit
-        now = time.monotonic()
-        if now - last_edit < _EDIT_INTERVAL:
+        now  = time.monotonic()
+        pct  = current / total * 100 if total else 0
+        elapsed = int(now - upload_start)
+
+        time_ok = (now - last_edit_t[0]) >= _UPLOAD_MIN_INTERVAL
+        pct_ok  = (pct - last_edit_pct[0]) >= _UPLOAD_PCT_STEP
+
+        if not (time_ok or pct_ok):
             return
-        last_edit = now
-        pct = current / total * 100 if total else 0
-        bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-        await _safe_edit(
-            status_message,
+
+        bar  = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+        text = (
             f"📤 <b>Uploading:</b> <code>{new_name}</code>\n"
             f"{bar} {pct:.1f}%\n"
-            f"{_human_size(current)} / {_human_size(total)}",
+            f"{_human_size(current)} / {_human_size(total)}"
+            f"  |  🕐 {_fmt_elapsed(elapsed)}"
         )
 
+        # Skip if nothing changed (avoids editing identical messages)
+        if text == last_edit_text[0]:
+            return
+
+        last_edit_t[0]    = now
+        last_edit_pct[0]  = pct
+        last_edit_text[0] = text
+        await _safe_edit(status_message, text)
+
     # ── 5. Send to user PM ────────────────────────────────────────────────
-    # Caption is just the title/season/episode — clean and simple.
     caption = _make_caption(new_name)
 
     try:
@@ -99,16 +113,13 @@ async def upload_file(
             chat_id=requesting_user_id,
             video=video_path,
             caption=caption,
-            # Duration mapped — required for Telegram seek bar
             duration=max(0, int(duration)),
-            # Dimensions for correct inline preview aspect ratio
             width=width  if width  > 0 else None,
             height=height if height > 0 else None,
             thumb=thumb_path if thumb_path and os.path.exists(thumb_path) else None,
             supports_streaming=True,
             progress=_progress,
         )
-        # Strip explicit None values (Pyrogram dislikes them on optional fields)
         send_kwargs = {k: v for k, v in send_kwargs.items() if v is not None}
 
         await client.send_video(**send_kwargs)
@@ -155,3 +166,13 @@ def _human_size(b: float) -> str:
             return f"{b:.1f} {unit}"
         b /= 1024
     return f"{b:.1f} TB"
+
+
+def _fmt_elapsed(secs: int) -> str:
+    h, r = divmod(secs, 3600)
+    m, s = divmod(r, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"

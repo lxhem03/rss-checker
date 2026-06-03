@@ -2,11 +2,15 @@
 DownloadManager
 
 Manages a pool of concurrent download+upload jobs.
-Each job:
-  1. Downloads torrent via libtorrent
-  2. For each video file found → uploads to user PM (parallel uploads)
-  3. Reports progress to AUTH_GROUP
-  4. Marks download as complete in DB for dedup
+
+Dedup policy
+────────────
+• /download command  → NO dedup against history. Only blocks if the exact
+                       same job_id is already in the active in-memory set
+                       (prevents accidental double-tap). Past downloads are
+                       always re-downloadable.
+• RSS workflow       → Full dedup via MongoDB. Skips any episode already
+                       marked as downloaded in the DB.
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -21,7 +26,7 @@ from typing import Dict, List, Optional
 from pyrogram import Client
 from pyrogram.types import Message
 
-from config import AUTH_GROUPS, DOWNLOAD_DIR, MAX_PARALLEL_DOWNLOADS
+from config import DOWNLOAD_DIR, MAX_PARALLEL_DOWNLOADS
 from bot.utils.torrent import download_torrent
 from bot.utils.uploader import upload_file
 from bot.utils.episode import extract_season_episode
@@ -29,6 +34,10 @@ from bot.utils.episode import extract_season_episode
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
+
+# How often (seconds) or what % step triggers a progress edit
+_PROGRESS_MIN_INTERVAL = 8      # never edit more often than this
+_PROGRESS_PCT_STEP     = 10     # also edit on every N% milestone
 
 
 @dataclass
@@ -39,6 +48,7 @@ class DownloadJob:
     source: Optional[str]
     torrent_file_id: Optional[str]
     group_chat_id: int
+    from_rss: bool = False          # ← controls dedup behaviour
     progress: float = 0.0
     speed: str = "0 B/s"
     eta: str = "∞"
@@ -61,12 +71,9 @@ class DownloadManager:
         title: str,
         source: Optional[str],
         torrent_file_id: Optional[str],
+        from_rss: bool = False,
     ) -> str:
         job_id = uuid.uuid4().hex[:8]
-        group_chat_id = message.chat.id
-
-        # Find first auth group that matches, or fall back to current chat
-        auth_group_id = group_chat_id
 
         job = DownloadJob(
             id=job_id,
@@ -74,7 +81,8 @@ class DownloadManager:
             user_id=message.from_user.id,
             source=source,
             torrent_file_id=torrent_file_id,
-            group_chat_id=auth_group_id,
+            group_chat_id=message.chat.id,
+            from_rss=from_rss,
         )
         self._jobs[job_id] = job
 
@@ -122,7 +130,6 @@ class DownloadManager:
             os.makedirs(job_dir, exist_ok=True)
 
             try:
-                # ── Resolve torrent source ────────────────────────────────
                 source = job.source
                 if job.torrent_file_id:
                     local_torrent = os.path.join(job_dir, "input.torrent")
@@ -136,18 +143,40 @@ class DownloadManager:
                     f"⏳ Connecting to peers…",
                 )
 
-                # ── Progress callback ─────────────────────────────────────
+                # ── Throttled progress callback ───────────────────────────
+                start_time   = time.monotonic()
+                last_edit_t  = [0.0]
+                last_edit_pct = [0.0]
+
                 async def on_progress(pct: float, speed: str, eta: str):
                     job.progress = pct
-                    job.speed = speed
-                    job.eta = eta
+                    job.speed    = speed
+                    job.eta      = eta
+
+                    now     = time.monotonic()
+                    elapsed = int(now - start_time)
+                    elapsed_str = _fmt_elapsed(elapsed)
+
+                    time_ok = (now - last_edit_t[0]) >= _PROGRESS_MIN_INTERVAL
+                    pct_ok  = (pct - last_edit_pct[0]) >= _PROGRESS_PCT_STEP
+
+                    if not (time_ok or pct_ok):
+                        return
+
+                    # Only skip if the text would be identical (pct unchanged)
+                    if pct == last_edit_pct[0] and not time_ok:
+                        return
+
+                    last_edit_t[0]   = now
+                    last_edit_pct[0] = pct
+
                     bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
                     await self._safe_edit(
                         status_msg,
                         f"🆔 <b>Job:</b> <code>{job.id}</code>\n"
                         f"⬇️ <b>Downloading:</b> {job.title}\n"
                         f"{bar} {pct:.1f}%\n"
-                        f"⚡ {speed} | ⏱ ETA: {eta}",
+                        f"⚡ {speed}  |  ⏱ ETA: {eta}  |  🕐 {elapsed_str}",
                     )
 
                 # ── Download ──────────────────────────────────────────────
@@ -158,7 +187,6 @@ class DownloadManager:
                     cancelled_event=job.cancelled,
                 )
 
-                # ── Filter video files ────────────────────────────────────
                 video_files = sorted([
                     f for f in all_files
                     if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
@@ -179,19 +207,18 @@ class DownloadManager:
                 )
 
                 db = client.db
-
-                # ── Upload each video (parallel) ──────────────────────────
                 upload_tasks = []
+
                 for vf in video_files:
                     _, episode = extract_season_episode(os.path.basename(vf))
                     ep_key = str(episode) if episode else os.path.basename(vf)
 
-                    # Dedup check
-                    if await db.is_duplicate(job.title, ep_key):
-                        logger.info("Skipping duplicate: %s %s", job.title, ep_key)
+                    # ── Dedup: RSS only ───────────────────────────────────
+                    # /download always proceeds; RSS skips already-done eps
+                    if job.from_rss and await db.is_duplicate(job.title, ep_key):
+                        logger.info("RSS dedup skip: %s %s", job.title, ep_key)
                         continue
 
-                    # Per-file status message
                     file_status = await client.send_message(
                         chat_id=status_msg.chat.id,
                         text=f"📤 Uploading: <code>{os.path.basename(vf)}</code>",
@@ -202,6 +229,11 @@ class DownloadManager:
 
                 if upload_tasks:
                     await asyncio.gather(*upload_tasks, return_exceptions=True)
+                elif job.from_rss:
+                    await self._safe_edit(
+                        status_msg,
+                        f"ℹ️ All episodes in this torrent were already uploaded. Skipped.",
+                    )
 
             except asyncio.CancelledError:
                 await self._safe_edit(
@@ -215,11 +247,7 @@ class DownloadManager:
                     f"❌ <b>Error in job</b> <code>{job.id}</code>:\n<code>{exc}</code>",
                 )
             finally:
-                # Cleanup job directory
-                try:
-                    shutil.rmtree(job_dir, ignore_errors=True)
-                except Exception:
-                    pass
+                shutil.rmtree(job_dir, ignore_errors=True)
                 self._jobs.pop(job.id, None)
 
     async def _upload_one(
@@ -239,6 +267,9 @@ class DownloadManager:
                 requesting_user_id=job.user_id,
                 status_message=file_status,
             )
+            # Always mark as downloaded (both /download and RSS)
+            # For RSS this prevents future re-downloads
+            # For /download it's just a history record — won't block re-downloads
             await db.mark_downloaded(job.title, ep_key, job.user_id)
         except Exception as exc:
             logger.exception("Upload failed for %s", video_path)
@@ -250,3 +281,13 @@ class DownloadManager:
             await msg.edit_text(text)
         except Exception:
             pass
+
+
+def _fmt_elapsed(secs: int) -> str:
+    h, r = divmod(secs, 3600)
+    m, s = divmod(r, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
