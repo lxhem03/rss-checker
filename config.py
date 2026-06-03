@@ -54,62 +54,61 @@ MAX_UPLOAD_RATE: int = int(os.environ.get("MAX_UPLOAD_RATE", "0"))
 RSS_CHECK_INTERVAL: int = max(60, min(300, int(os.environ.get("RSS_CHECK_INTERVAL", "120"))))
 
 # ─────────────────────────────────────────
-#  Episode / Season regex patterns
-#  Each pattern must have named groups: season (optional) and episode
+#  Season / Episode patterns
+#
+#  Format: (compiled_re, group_name_tuple)
+#
+#  group_name_tuple entries must be 'season' and/or 'episode' in the same
+#  order as the capture groups in the pattern.
+#
+#  Patterns are tried in ORDER — put the most specific ones first.
 # ─────────────────────────────────────────
-SEASON_EPISODE_PATTERNS: List[re.Pattern] = [
+SEASON_EPISODE_PATTERNS = [
 
-    # S01.E02 / S01-E02 / S01E11 (fixed)
-    (re.compile(r'[Ss](\d{1,2})[.\- _]*[Ee](\d{1,3})'),
-     ('season', 'episode')),
+    # ── P1: Standard SxxExx ──────────────────────────────────────────────
+    # S04E05  S01E01v2  S01E04-Title  (v-suffix after episode is ignored)
+    (
+        re.compile(r'[Ss](\d{1,2})\s*[Ee](\d{1,3})'),
+        ('season', 'episode'),
+    ),
 
-    # Season 1 Episode 2 (full words)
-    (re.compile(r'Season[._\s]+(\d{1,2})[._\s]+Episode[._\s]+(\d{1,3})', re.IGNORECASE),
-     ('season', 'episode')),
+    # ── P2: "N(st|nd|rd|th) Season … - EP" ──────────────────────────────
+    # Season 2 - 11
+    # 5th Season - 07
+    # 4th Season: 2-nensei-hen 1 Gakki - 12
+    # Captures: last number before the word "Season", episode after the dash
+    (
+        re.compile(
+            r'(\d+)(?:st|nd|rd|th)?\s+Season\b.*?[-\u2013\u2014]\s*(\d{1,3})'
+            r'(?=\s*[\[\(]|\s*$)',
+            re.IGNORECASE | re.DOTALL,
+        ),
+        ('season', 'episode'),
+    ),
 
-    # S1 Ep2 (mixed short words)
-    (re.compile(r'[Ss](\d{1,2})[._\s]+[Ee]p?[._\s]?(\d{1,3})'),
-     ('season', 'episode')),
+    # ── P3: "Title N - EP" (bare digit season before dash+episode) ───────
+    # Jihanki 3 - 09
+    # Rule: single digit 1–9 as a standalone word, then " - " then 2-3 digit ep
+    # Negative lookbehind ensures it's not part of a longer number (e.g. 1080)
+    (
+        re.compile(r'(?<!\d)\b([1-9])\s+-\s+(\d{2,3})(?=\s*[\[\(]|\s*$)'),
+        ('season', 'episode'),
+    ),
 
-    # Season-1_Ep-02 type messy formats
-    (re.compile(r'Season[._\-\s]*(\d{1,2})[._\-\s]*Ep(?:isode)?[._\-\s]*(\d{1,3})', re.IGNORECASE),
-     ('season', 'episode')),
+    # ── P4: " - EP" episode-only (no season) ─────────────────────────────
+    # - 09 (1080p)    - 09 [1080p    (SubsPlease / Erai-raws no-season style)
+    # Negative lookbehind on \d prevents matching the season leg of P3
+    (
+        re.compile(r'(?<!\d)\s+-\s+(\d{2,3})\s*[\[\(]'),
+        ('episode',),
+    ),
 
-    # New pattern for: S02 - 05, S01 - 12, Demon Slayer S02 - 05 style
-    (re.compile(r'[Ss](\d{1,2})[\s._-]*[-–—]?[\s._]*(\d{1,3})', re.IGNORECASE),
-     ('season', 'episode')),
-
-    # One Punch man 3 - 12 
-    (re.compile(r'[\s._-](\d{1,2})[\s._-]+(\d{1,3})(?=\.[^.]+$)'),
-     ('season', 'episode')),
-
-    (re.compile(r'(\d+)(?:st|nd|rd|th)[._\s]*Season[\s._-]*[-–—]?[\s._-]*(\d{1,3})',re.IGNORECASE),
-     ('season', 'episode')),
-
-    # Title - 12 (Dual-1080p...) style   ← ADD THIS
-    (re.compile(r'[\s-]+\b(\d{1,3})\b\s*(?=\()', re.IGNORECASE),
-     ('episode',)),
-
-    # Ep123, Episode 123, ep.123  (require "Ep" or "Episode", not just "e")
-    (re.compile(r'(?i)\b(?:ep|episode)[._\s-]*(\d{1,4})\b'),
-     ('episode',)),
-
-    # E123 / E 123 / E-123 / E_123  (require word boundary or separator)
-    (re.compile(r'(?i)\b[Ee][._\s-]?(\d{1,4})\b'),
-     ('episode',)),
-
-    # Season as ordinal (2nd, 3rd) followed by episode number: 2nd_Season_03, 3rd_Season_02
-    (re.compile(r'(\d+)(?:st|nd|rd|th)[._\s]*Season[._\s]*(\d{1,3})', re.IGNORECASE),
-     ('season', 'episode')),
-
-    # Episode at the very beginning: 003_ or 12. or 001 -
-    (re.compile(r'^(\d{2,4})(?=[._\-\s])'),
-     ('episode',)),
-
-    # Absolute episode numbers (anime style) - stricter version
-    # Only standalone numbers, not part of words like "me123c"
-    (re.compile(r'(?<!\w)(\d{2,4})(?!\w)'),
-     ('episode',)),
+    # ── P5: Ep / Episode keyword ─────────────────────────────────────────
+    # Ep12  Episode 12  ep.12
+    (
+        re.compile(r'(?i)\b(?:ep|episode)[._\s-]*(\d{1,4})\b'),
+        ('episode',),
+    ),
 ]
 
 # ─────────────────────────────────────────
