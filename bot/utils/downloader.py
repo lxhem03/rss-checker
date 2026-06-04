@@ -1,16 +1,14 @@
 """
-DownloadManager
-
-Manages a pool of concurrent download+upload jobs.
+DownloadManager — queues and runs torrent download+upload jobs.
 
 Dedup policy
-────────────
-• /download command  → NO dedup against history. Only blocks if the exact
-                       same job_id is already in the active in-memory set
-                       (prevents accidental double-tap). Past downloads are
-                       always re-downloadable.
-• RSS workflow       → Full dedup via MongoDB. Skips any episode already
-                       marked as downloaded in the DB.
+  /download  → no history dedup; only skips in-flight duplicates
+  RSS        → full MongoDB dedup
+
+Channel delivery (Phase 2)
+  /download  → uses user's dump_channels setting
+  RSS        → uses user's upload_channels setting
+  Both respect forward_to_pm toggle.
 """
 from __future__ import annotations
 
@@ -21,7 +19,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pyrogram import Client
 from pyrogram.types import Message
@@ -30,14 +28,18 @@ from config import DOWNLOAD_DIR, MAX_PARALLEL_DOWNLOADS
 from bot.utils.torrent import download_torrent
 from bot.utils.uploader import upload_file
 from bot.utils.episode import extract_season_episode
+from bot.utils.user_settings import (
+    get_dump_channels,
+    get_upload_channels,
+    forward_to_pm,
+)
 
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"}
 
-# How often (seconds) or what % step triggers a progress edit
-_PROGRESS_MIN_INTERVAL = 8      # never edit more often than this
-_PROGRESS_PCT_STEP     = 10     # also edit on every N% milestone
+_PROGRESS_MIN_INTERVAL = 8
+_PROGRESS_PCT_STEP     = 10
 
 
 @dataclass
@@ -48,7 +50,7 @@ class DownloadJob:
     source: Optional[str]
     torrent_file_id: Optional[str]
     group_chat_id: int
-    from_rss: bool = False          # ← controls dedup behaviour
+    from_rss: bool = False
     progress: float = 0.0
     speed: str = "0 B/s"
     eta: str = "∞"
@@ -62,8 +64,6 @@ class DownloadManager:
         self._jobs: Dict[str, DownloadJob] = {}
         self._semaphore = asyncio.Semaphore(MAX_PARALLEL_DOWNLOADS)
 
-    # ── Public API ────────────────────────────────────────────────────────
-
     async def enqueue(
         self,
         client: Client,
@@ -74,7 +74,6 @@ class DownloadManager:
         from_rss: bool = False,
     ) -> str:
         job_id = uuid.uuid4().hex[:8]
-
         job = DownloadJob(
             id=job_id,
             title=title,
@@ -89,10 +88,9 @@ class DownloadManager:
         status_msg = await message.reply_text(
             f"🆔 <b>Job:</b> <code>{job_id}</code>\n"
             f"📥 <b>Queued:</b> {title}\n"
-            f"⏳ Waiting for a free download slot…",
+            f"⏳ Waiting for a free slot…",
             quote=True,
         )
-
         job.task = asyncio.create_task(
             self._run_job(job, status_msg, client),
             name=f"job-{job_id}",
@@ -110,17 +108,10 @@ class DownloadManager:
 
     def get_active_jobs(self) -> List[dict]:
         return [
-            {
-                "id": j.id,
-                "title": j.title,
-                "progress": j.progress,
-                "speed": j.speed,
-            }
+            {"id": j.id, "title": j.title, "progress": j.progress, "speed": j.speed}
             for j in self._jobs.values()
             if j.task and not j.task.done()
         ]
-
-    # ── Internal ──────────────────────────────────────────────────────────
 
     async def _run_job(
         self, job: DownloadJob, status_msg: Message, client: Client
@@ -130,53 +121,57 @@ class DownloadManager:
             os.makedirs(job_dir, exist_ok=True)
 
             try:
+                # ── Fetch user settings once ──────────────────────────────
+                user_settings: Dict[str, Any] = await client.db.get_settings(job.user_id)
+
+                # Determine channels based on command type
+                if job.from_rss:
+                    channels = get_upload_channels(user_settings)
+                else:
+                    channels = get_dump_channels(user_settings)
+
+                do_pm = forward_to_pm(user_settings)
+
+                # ── Resolve torrent source ────────────────────────────────
                 source = job.source
                 if job.torrent_file_id:
                     local_torrent = os.path.join(job_dir, "input.torrent")
                     await client.download_media(job.torrent_file_id, file_name=local_torrent)
                     source = local_torrent
 
-                await self._safe_edit(
+                await _safe_edit(
                     status_msg,
                     f"🆔 <b>Job:</b> <code>{job.id}</code>\n"
                     f"⬇️ <b>Downloading:</b> {job.title}\n"
                     f"⏳ Connecting to peers…",
                 )
 
-                # ── Throttled progress callback ───────────────────────────
-                start_time   = time.monotonic()
-                last_edit_t  = [0.0]
+                # ── Download progress callback ────────────────────────────
+                start_time    = time.monotonic()
+                last_edit_t   = [0.0]
                 last_edit_pct = [0.0]
 
                 async def on_progress(pct: float, speed: str, eta: str):
                     job.progress = pct
                     job.speed    = speed
                     job.eta      = eta
-
                     now     = time.monotonic()
                     elapsed = int(now - start_time)
-                    elapsed_str = _fmt_elapsed(elapsed)
-
                     time_ok = (now - last_edit_t[0]) >= _PROGRESS_MIN_INTERVAL
                     pct_ok  = (pct - last_edit_pct[0]) >= _PROGRESS_PCT_STEP
-
                     if not (time_ok or pct_ok):
                         return
-
-                    # Only skip if the text would be identical (pct unchanged)
                     if pct == last_edit_pct[0] and not time_ok:
                         return
-
                     last_edit_t[0]   = now
                     last_edit_pct[0] = pct
-
                     bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-                    await self._safe_edit(
+                    await _safe_edit(
                         status_msg,
                         f"🆔 <b>Job:</b> <code>{job.id}</code>\n"
                         f"⬇️ <b>Downloading:</b> {job.title}\n"
                         f"{bar} {pct:.1f}%\n"
-                        f"⚡ {speed}  |  ⏱ ETA: {eta}  |  🕐 {elapsed_str}",
+                        f"⚡ {speed}  |  ⏱ ETA: {eta}  |  🕐 {_fmt_elapsed(elapsed)}",
                     )
 
                 # ── Download ──────────────────────────────────────────────
@@ -187,42 +182,49 @@ class DownloadManager:
                     cancelled_event=job.cancelled,
                 )
 
-                # Sort by episode number so uploads go E01 → E02 → … in order
+                # ── Sort video files by episode number ────────────────────
                 raw_videos = [
                     f for f in all_files
                     if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
                 ]
 
-                def _ep_sort_key(path: str):
-                    _, ep = extract_season_episode(os.path.basename(path))
+                def _ep_key(path: str):
+                    _, ep = extract_season_episode(
+                        os.path.basename(path), user_settings
+                    )
                     return ep if ep is not None else 9999
 
-                video_files = sorted(raw_videos, key=_ep_sort_key)
+                video_files = sorted(raw_videos, key=_ep_key)
 
                 if not video_files:
-                    await self._safe_edit(
+                    await _safe_edit(
                         status_msg,
                         f"⚠️ <b>No video files found</b> in torrent <code>{job.id}</code>.",
                     )
                     return
 
-                await self._safe_edit(
+                dest_label = (
+                    f"channel(s) + PM" if channels and do_pm else
+                    f"channel(s)"      if channels else
+                    "PM"
+                )
+                await _safe_edit(
                     status_msg,
                     f"✅ <b>Download complete!</b> <code>{job.id}</code>\n"
-                    f"📁 {len(video_files)} video file(s) — uploading in order…",
+                    f"📁 {len(video_files)} video file(s)\n"
+                    f"📤 Uploading to {dest_label}…",
                 )
 
-                db = client.db
+                db       = client.db
                 uploaded = 0
                 skipped  = 0
 
-                # Sequential loop — guarantees episode order and isolates
-                # each thumbnail in its own subdir (no collisions)
                 for vf in video_files:
-                    _, episode = extract_season_episode(os.path.basename(vf))
+                    _, episode = extract_season_episode(
+                        os.path.basename(vf), user_settings
+                    )
                     ep_key = str(episode) if episode is not None else os.path.basename(vf)
 
-                    # Dedup: RSS only — /download always proceeds
                     if job.from_rss and await db.is_duplicate(job.title, ep_key):
                         logger.info("RSS dedup skip: %s ep=%s", job.title, ep_key)
                         skipped += 1
@@ -232,28 +234,28 @@ class DownloadManager:
                         chat_id=status_msg.chat.id,
                         text=f"📤 Uploading: <code>{os.path.basename(vf)}</code>",
                     )
-                    await self._upload_one(client, vf, job, ep_key, file_status)
+                    await _upload_one(
+                        client, vf, job, ep_key, file_status,
+                        channels, do_pm, user_settings, db,
+                    )
                     uploaded += 1
 
                 if uploaded == 0 and job.from_rss:
-                    await self._safe_edit(
+                    await _safe_edit(
                         status_msg,
                         f"ℹ️ All {skipped} episode(s) already uploaded. Skipped.",
                     )
                 elif skipped:
-                    await self._safe_edit(
+                    await _safe_edit(
                         status_msg,
                         f"✅ Done — {uploaded} uploaded, {skipped} already existed (skipped).",
                     )
 
             except asyncio.CancelledError:
-                await self._safe_edit(
-                    status_msg,
-                    f"🛑 <b>Cancelled:</b> <code>{job.id}</code>",
-                )
+                await _safe_edit(status_msg, f"🛑 <b>Cancelled:</b> <code>{job.id}</code>")
             except Exception as exc:
                 logger.exception("Job %s failed", job.id)
-                await self._safe_edit(
+                await _safe_edit(
                     status_msg,
                     f"❌ <b>Error in job</b> <code>{job.id}</code>:\n<code>{exc}</code>",
                 )
@@ -261,37 +263,43 @@ class DownloadManager:
                 shutil.rmtree(job_dir, ignore_errors=True)
                 self._jobs.pop(job.id, None)
 
-    async def _upload_one(
-        self,
-        client: Client,
-        video_path: str,
-        job: DownloadJob,
-        ep_key: str,
-        file_status: Message,
-    ) -> None:
-        db = client.db
-        try:
-            await upload_file(
-                client=client,
-                video_path=video_path,
-                title=job.title,
-                requesting_user_id=job.user_id,
-                status_message=file_status,
-            )
-            # Always mark as downloaded (both /download and RSS)
-            # For RSS this prevents future re-downloads
-            # For /download it's just a history record — won't block re-downloads
-            await db.mark_downloaded(job.title, ep_key, job.user_id)
-        except Exception as exc:
-            logger.exception("Upload failed for %s", video_path)
-            await self._safe_edit(file_status, f"❌ Upload failed: <code>{exc}</code>")
 
-    @staticmethod
-    async def _safe_edit(msg: Message, text: str) -> None:
+async def _upload_one(
+    client: Client,
+    video_path: str,
+    job: DownloadJob,
+    ep_key: str,
+    file_status: Message,
+    channels: List[int],
+    do_pm: bool,
+    user_settings: Dict[str, Any],
+    db,
+) -> None:
+    try:
+        await upload_file(
+            client=client,
+            video_path=video_path,
+            title=job.title,
+            requesting_user_id=job.user_id,
+            status_message=file_status,
+            channels=channels,
+            do_forward_pm=do_pm,
+            user_settings=user_settings,
+        )
+        await db.mark_downloaded(job.title, ep_key, job.user_id)
+    except Exception as exc:
+        logger.exception("Upload failed for %s", video_path)
         try:
-            await msg.edit_text(text)
+            await file_status.edit_text(f"❌ Upload failed: <code>{exc}</code>")
         except Exception:
             pass
+
+
+async def _safe_edit(msg: Message, text: str) -> None:
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        pass
 
 
 def _fmt_elapsed(secs: int) -> str:
