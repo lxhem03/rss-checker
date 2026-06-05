@@ -1,10 +1,7 @@
-# ── uvloop + event loop setup — MUST happen before any pyrogram import ────────
 try:
     import uvloop
     import asyncio
     uvloop.install()
-    # Explicitly create and set a loop so Pyrogram's sync.py import-time
-    # call to asyncio.get_event_loop() finds one and doesn't raise.
     loop = uvloop.new_event_loop()
     asyncio.set_event_loop(loop)
 except ImportError:
@@ -15,7 +12,7 @@ except ImportError:
 import logging
 import os
 
-from pyrogram import Client
+from pyrogram import Client, utils
 from pyrogram.enums import ParseMode
 
 from config import (
@@ -36,6 +33,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+utils.MIN_CHAT_ID = -999999999999
+utils.MIN_CHANNEL_ID = -100999999999999
 
 
 async def main() -> None:
