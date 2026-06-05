@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 
-from pyrogram import Client
+from pyrogram import Client, utils
 from pyrogram.enums import ParseMode
 
 from config import API_ID, API_HASH, BOT_TOKEN, WORKERS, DOWNLOAD_DIR
@@ -19,6 +19,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+utils.MIN_CHAT_ID = -999999999999
+utils.MIN_CHANNEL_ID = -100999999999999
 
 
 async def main() -> None:
