@@ -1,7 +1,4 @@
-# ── Install uvloop FIRST — before any asyncio usage ───────────────────────────
-# uvloop replaces Python's default asyncio event loop with a faster
-# libuv-based implementation. Must be installed and called before anything
-# else touches the event loop.
+
 try:
     import uvloop
     uvloop.install()
@@ -12,7 +9,7 @@ import asyncio
 import logging
 import os
 
-from pyrogram import Client
+from pyrogram import Client, utils
 from pyrogram.enums import ParseMode
 
 from config import (
@@ -33,6 +30,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+utils.MIN_CHAT_ID = -999999999999
+utils.MIN_CHANNEL_ID = -100999999999999
 
 
 async def main() -> None:
