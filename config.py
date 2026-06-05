@@ -29,7 +29,7 @@ AUTH_GROUPS: List[int] = [
 # ─────────────────────────────────────────
 #  MongoDB
 # ─────────────────────────────────────────
-MONGO_URI: str = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI: str = os.environ.get("MONGO_URI", "")
 MONGO_DB: str = os.environ.get("MONGO_DB", "rss_bot")
 
 # ─────────────────────────────────────────
