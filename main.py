@@ -1,15 +1,21 @@
-
+# ── uvloop + event loop setup — MUST happen before any pyrogram import ────────
 try:
     import uvloop
+    import asyncio
     uvloop.install()
+    # Explicitly create and set a loop so Pyrogram's sync.py import-time
+    # call to asyncio.get_event_loop() finds one and doesn't raise.
+    loop = uvloop.new_event_loop()
+    asyncio.set_event_loop(loop)
 except ImportError:
-    pass   # uvloop is Linux-only; fall back silently on other platforms
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-import asyncio
 import logging
 import os
 
-from pyrogram import Client, utils
+from pyrogram import Client
 from pyrogram.enums import ParseMode
 
 from config import (
@@ -30,9 +36,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-utils.MIN_CHAT_ID = -999999999999
-utils.MIN_CHANNEL_ID = -100999999999999
 
 
 async def main() -> None:
@@ -56,15 +59,12 @@ async def main() -> None:
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         workers=WORKERS,
-        # Controls how many chunks are uploaded in parallel per file.
-        # Default is 1 (sequential). 100 saturates the connection and
-        # matches WZML-X's observed ~10 MB/s on the same API credentials.
         max_concurrent_transmissions=MAX_CONCURRENT_TRANSMISSIONS,
         parse_mode=ParseMode.HTML,
     )
 
     app.db = db
-    app.download_manager = None   # filled after client starts
+    app.download_manager = None
 
     register_handlers(app)
 
@@ -80,4 +80,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop.run_until_complete(main())
