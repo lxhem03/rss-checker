@@ -1,11 +1,25 @@
+# ── Install uvloop FIRST — before any asyncio usage ───────────────────────────
+# uvloop replaces Python's default asyncio event loop with a faster
+# libuv-based implementation. Must be installed and called before anything
+# else touches the event loop.
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass   # uvloop is Linux-only; fall back silently on other platforms
+
 import asyncio
 import logging
 import os
 
-from pyrogram import Client, utils
+from pyrogram import Client
 from pyrogram.enums import ParseMode
 
-from config import API_ID, API_HASH, BOT_TOKEN, WORKERS, DOWNLOAD_DIR
+from config import (
+    API_ID, API_HASH, BOT_TOKEN,
+    WORKERS, MAX_CONCURRENT_TRANSMISSIONS,
+    DOWNLOAD_DIR,
+)
 from bot.handlers import register_handlers
 from bot.tasks.rss_checker import RssCheckerTask
 from bot.utils.downloader import DownloadManager
@@ -20,12 +34,9 @@ logger = logging.getLogger(__name__)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-utils.MIN_CHAT_ID = -999999999999
-utils.MIN_CHANNEL_ID = -100999999999999
-
 
 async def main() -> None:
-    # ── Database first — fail fast if URI is wrong ─────────────────────────
+    # ── Database — fail fast if URI is wrong ──────────────────────────────
     db = Database()
     try:
         await db.connect()
@@ -38,18 +49,22 @@ async def main() -> None:
         )
         raise SystemExit(1)
 
-    # ── Pyrogram client ────────────────────────────────────────────────────
+    # ── Pyrogram client ───────────────────────────────────────────────────
     app = Client(
         name="rss_bot",
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         workers=WORKERS,
+        # Controls how many chunks are uploaded in parallel per file.
+        # Default is 1 (sequential). 100 saturates the connection and
+        # matches WZML-X's observed ~10 MB/s on the same API credentials.
+        max_concurrent_transmissions=MAX_CONCURRENT_TRANSMISSIONS,
         parse_mode=ParseMode.HTML,
     )
 
     app.db = db
-    app.download_manager = None  # filled after client starts
+    app.download_manager = None   # filled after client starts
 
     register_handlers(app)
 
@@ -59,8 +74,9 @@ async def main() -> None:
         rss_task = RssCheckerTask(app, db)
         await rss_task.start()
 
-        logger.info("✅ Bot is live.")
-        await asyncio.Event().wait()   # run forever
+        loop_name = type(asyncio.get_event_loop()).__name__
+        logger.info("✅ Bot is live. Event loop: %s", loop_name)
+        await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
