@@ -43,6 +43,13 @@ MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "3"))
 # Pyrogram upload workers (increases upload throughput)
 WORKERS: int = int(os.environ.get("WORKERS", "4"))
 
+# Parallel chunk transmissions per file upload.
+# 1  = default Pyrogram (slow, sequential chunks)
+# 100 = WZML-X setting, saturates the uplink for ~10 MB/s on good servers
+MAX_CONCURRENT_TRANSMISSIONS: int = int(
+    os.environ.get("MAX_CONCURRENT_TRANSMISSIONS", "100")
+)
+
 # libtorrent session upload/download rate limits (bytes/sec, 0 = unlimited)
 MAX_DOWNLOAD_RATE: int = int(os.environ.get("MAX_DOWNLOAD_RATE", "0"))
 MAX_UPLOAD_RATE: int = int(os.environ.get("MAX_UPLOAD_RATE", "0"))
