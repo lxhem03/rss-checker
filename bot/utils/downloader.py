@@ -2,13 +2,16 @@
 DownloadManager — queues and runs torrent download+upload jobs.
 
 Dedup policy
-  /download  → no history dedup; only skips in-flight duplicates
+  /download  → no history dedup
   RSS        → full MongoDB dedup
 
-Channel delivery (Phase 2)
-  /download  → uses user's dump_channels setting
-  RSS        → uses user's upload_channels setting
+Channel delivery
+  /download  → dump_channels from user settings
+  RSS        → upload_channels from user settings
   Both respect forward_to_pm toggle.
+
+-replace flag
+  Stored per-job; applied to each filename before season/episode extraction.
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyrogram import Client
 from pyrogram.types import Message
@@ -28,6 +31,7 @@ from config import DOWNLOAD_DIR, MAX_PARALLEL_DOWNLOADS
 from bot.utils.torrent import download_torrent
 from bot.utils.uploader import upload_file
 from bot.utils.episode import extract_season_episode
+from bot.utils.arg_parser import apply_replacements
 from bot.utils.user_settings import (
     get_dump_channels,
     get_upload_channels,
@@ -51,6 +55,7 @@ class DownloadJob:
     torrent_file_id: Optional[str]
     group_chat_id: int
     from_rss: bool = False
+    replacements: List[Tuple[str, str]] = field(default_factory=list)
     progress: float = 0.0
     speed: str = "0 B/s"
     eta: str = "∞"
@@ -72,6 +77,8 @@ class DownloadManager:
         source: Optional[str],
         torrent_file_id: Optional[str],
         from_rss: bool = False,
+        replacements: Optional[List[Tuple[str, str]]] = None,
+        avoid_keywords: Optional[List[str]] = None,   # accepted but not used here
     ) -> str:
         job_id = uuid.uuid4().hex[:8]
         job = DownloadJob(
@@ -82,6 +89,7 @@ class DownloadManager:
             torrent_file_id=torrent_file_id,
             group_chat_id=message.chat.id,
             from_rss=from_rss,
+            replacements=replacements or [],
         )
         self._jobs[job_id] = job
 
@@ -121,18 +129,14 @@ class DownloadManager:
             os.makedirs(job_dir, exist_ok=True)
 
             try:
-                # ── Fetch user settings once ──────────────────────────────
                 user_settings: Dict[str, Any] = await client.db.get_settings(job.user_id)
 
-                # Determine channels based on command type
-                if job.from_rss:
-                    channels = get_upload_channels(user_settings)
-                else:
-                    channels = get_dump_channels(user_settings)
-
+                channels = (
+                    get_upload_channels(user_settings) if job.from_rss
+                    else get_dump_channels(user_settings)
+                )
                 do_pm = forward_to_pm(user_settings)
 
-                # ── Resolve torrent source ────────────────────────────────
                 source = job.source
                 if job.torrent_file_id:
                     local_torrent = os.path.join(job_dir, "input.torrent")
@@ -146,7 +150,6 @@ class DownloadManager:
                     f"⏳ Connecting to peers…",
                 )
 
-                # ── Download progress callback ────────────────────────────
                 start_time    = time.monotonic()
                 last_edit_t   = [0.0]
                 last_edit_pct = [0.0]
@@ -174,7 +177,6 @@ class DownloadManager:
                         f"⚡ {speed}  |  ⏱ ETA: {eta}  |  🕐 {_fmt_elapsed(elapsed)}",
                     )
 
-                # ── Download ──────────────────────────────────────────────
                 all_files = await download_torrent(
                     source=source,
                     dest_dir=job_dir,
@@ -182,16 +184,15 @@ class DownloadManager:
                     cancelled_event=job.cancelled,
                 )
 
-                # ── Sort video files by episode number ────────────────────
                 raw_videos = [
                     f for f in all_files
                     if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
                 ]
 
                 def _ep_key(path: str):
-                    _, ep = extract_season_episode(
-                        os.path.basename(path), user_settings
-                    )
+                    # Apply replacements before extraction for sort key too
+                    adjusted = apply_replacements(os.path.basename(path), job.replacements)
+                    _, ep = extract_season_episode(adjusted, user_settings)
                     return ep if ep is not None else 9999
 
                 video_files = sorted(raw_videos, key=_ep_key)
@@ -204,8 +205,8 @@ class DownloadManager:
                     return
 
                 dest_label = (
-                    f"channel(s) + PM" if channels and do_pm else
-                    f"channel(s)"      if channels else
+                    "channel(s) + PM" if channels and do_pm else
+                    "channel(s)"      if channels else
                     "PM"
                 )
                 await _safe_edit(
@@ -220,9 +221,9 @@ class DownloadManager:
                 skipped  = 0
 
                 for vf in video_files:
-                    _, episode = extract_season_episode(
-                        os.path.basename(vf), user_settings
-                    )
+                    # Apply replacements to the basename for episode key extraction
+                    adjusted_name = apply_replacements(os.path.basename(vf), job.replacements)
+                    _, episode = extract_season_episode(adjusted_name, user_settings)
                     ep_key = str(episode) if episode is not None else os.path.basename(vf)
 
                     if job.from_rss and await db.is_duplicate(job.title, ep_key):
@@ -265,15 +266,8 @@ class DownloadManager:
 
 
 async def _upload_one(
-    client: Client,
-    video_path: str,
-    job: DownloadJob,
-    ep_key: str,
-    file_status: Message,
-    channels: List[int],
-    do_pm: bool,
-    user_settings: Dict[str, Any],
-    db,
+    client, video_path, job, ep_key, file_status,
+    channels, do_pm, user_settings, db,
 ) -> None:
     try:
         await upload_file(
@@ -285,6 +279,7 @@ async def _upload_one(
             channels=channels,
             do_forward_pm=do_pm,
             user_settings=user_settings,
+            replacements=job.replacements,   # ← passed to uploader/episode
         )
         await db.mark_downloaded(job.title, ep_key, job.user_id)
     except Exception as exc:

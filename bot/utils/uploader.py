@@ -3,13 +3,19 @@ Rename → metadata → screenshot → upload.
 
 Delivery logic (per user settings)
 ────────────────────────────────────
-  channels provided   forward_to_pm   result
-  ─────────────────   ─────────────   ──────────────────────────────────────
-  []                  any             → user PM only (Phase-1 behaviour)
-  [ch1, ch2, …]       True            → ch1 (full upload) + ch2…N (forward)
-                                        + user PM (forward from ch1)
-  [ch1, ch2, …]       False           → ch1 (full upload) + ch2…N (forward)
-                                        PM skipped
+  channels set  forward_to_pm   result
+  ────────────  ─────────────   ──────────────────────────────────────────
+  []            any             → PM only (Phase-1 behaviour)
+  [ch1,…]       True            → full upload to ch1, forward to ch2…N,
+                                  then forward to PM
+  [ch1,…]       False           → full upload to ch1, forward to ch2…N,
+                                  PM skipped
+
+Peer resolution
+───────────────
+resolve_all() is called before every send so "peer id invalid" never
+surfaces to the user.  Unresolvable channels are reported in the group
+status message but don't abort the rest of the upload.
 """
 from __future__ import annotations
 
@@ -17,13 +23,15 @@ import logging
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyrogram import Client
 from pyrogram.types import Message
 
 from bot.utils.episode import build_filename
+from bot.utils.arg_parser import apply_replacements
 from bot.utils.ffmpeg import get_video_metadata, take_screenshot
+from bot.utils.peer import resolve_all
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +49,10 @@ async def upload_file(
     title: str,
     requesting_user_id: int,
     status_message: Message,
-    # ── Phase-2 additions ──────────────────────────────────────────────────
-    channels: Optional[List[int]] = None,        # dump or upload channel IDs
-    do_forward_pm: bool = True,                  # forward to user PM too?
-    user_settings: Optional[Dict[str, Any]] = None,  # for custom template/patterns
+    channels: Optional[List[int]] = None,
+    do_forward_pm: bool = True,
+    user_settings: Optional[Dict[str, Any]] = None,
+    replacements: Optional[List[Tuple[str, str]]] = None,
 ) -> None:
     base_dir  = os.path.dirname(video_path)
     stem      = os.path.splitext(os.path.basename(video_path))[0]
@@ -59,6 +67,7 @@ async def upload_file(
             title,
             os.path.basename(video_path),
             user_settings=user_settings,
+            replacements=replacements or [],
         )
         new_path = os.path.join(base_dir, new_name)
         if os.path.abspath(video_path) != os.path.abspath(new_path):
@@ -83,7 +92,33 @@ async def upload_file(
             f"📤 <b>Uploading:</b> <code>{new_name}</code>\n⬆️ Starting…",
         )
 
-        # ── 4. Throttled progress ─────────────────────────────────────────
+        # ── 4. Resolve all peers before touching send_* ───────────────────
+        send_channels: List[int] = []
+        if channels:
+            good, failed = await resolve_all(client, channels)
+            send_channels = good
+            if failed:
+                bad_str = ", ".join(
+                    f"<code>{cid}</code> ({reason})" for cid, reason in failed
+                )
+                await _safe_edit(
+                    status_message,
+                    f"⚠️ Could not resolve channel(s): {bad_str}\n"
+                    f"Continuing with the rest…",
+                )
+                # Brief pause so user can read the warning
+                import asyncio; await asyncio.sleep(2)
+
+        # Also resolve the PM target (user may have never started the bot)
+        pm_id: Optional[int] = None
+        if do_forward_pm or not send_channels:
+            resolved_pm, pm_err = await _resolve_pm(client, requesting_user_id)
+            if pm_err:
+                logger.warning("Cannot reach PM of user %d: %s", requesting_user_id, pm_err)
+            else:
+                pm_id = resolved_pm
+
+        # ── 5. Throttled progress ─────────────────────────────────────────
         upload_start   = time.monotonic()
         last_edit_t    = [0.0]
         last_edit_pct  = [-1.0]
@@ -111,14 +146,10 @@ async def upload_file(
             last_edit_text[0] = text
             await _safe_edit(status_message, text)
 
-        # ── 5. Determine delivery targets ─────────────────────────────────
-        send_channels = list(channels) if channels else []
-
-        # ── 6. Upload ─────────────────────────────────────────────────────
-        caption    = _make_caption(new_name)
-        thumb_arg  = thumb_path if thumb_path and os.path.exists(thumb_path) else None
-
-        base_kwargs = dict(
+        # ── 6. Build common kwargs (no video= yet — added per-call) ───────
+        caption   = _make_caption(new_name)
+        thumb_arg = thumb_path if thumb_path and os.path.exists(thumb_path) else None
+        base_kw   = dict(
             caption=caption,
             duration=max(0, int(duration)),
             width=width   if width  > 0 else None,
@@ -126,68 +157,76 @@ async def upload_file(
             thumb=thumb_arg,
             supports_streaming=True,
         )
-        base_kwargs = {k: v for k, v in base_kwargs.items() if v is not None}
+        base_kw = {k: v for k, v in base_kw.items() if v is not None}
 
-        first_msg = None  # we'll reuse its file_id for all subsequent sends
+        # ── 7. Deliver ────────────────────────────────────────────────────
+        first_msg = None
 
         if send_channels:
-            # ── 6a. Full upload to first channel ──────────────────────────
-            first_ch = send_channels[0]
+            # Full upload to first channel
             first_msg = await client.send_video(
-                chat_id=first_ch,
+                chat_id=send_channels[0],
                 video=video_path,
                 progress=_progress,
-                **base_kwargs,
+                **base_kw,
             )
-            logger.info("Uploaded '%s' to channel %d", new_name, first_ch)
+            logger.info("Uploaded '%s' to channel %d", new_name, send_channels[0])
 
-            # ── 6b. Forward by file_id to remaining channels ──────────────
+            # Forward by file_id to remaining channels
             for ch in send_channels[1:]:
                 try:
                     await client.send_video(
                         chat_id=ch,
                         video=first_msg.video.file_id,
-                        **base_kwargs,
+                        **base_kw,
                     )
                     logger.info("Forwarded '%s' to channel %d", new_name, ch)
                 except Exception as exc:
-                    logger.error("Forward to %d failed: %s", ch, exc)
+                    logger.error("Forward to channel %d failed: %s", ch, exc)
                     await _safe_edit(
                         status_message,
-                        f"⚠️ Failed to forward to <code>{ch}</code>: <code>{exc}</code>",
+                        f"⚠️ Forward to <code>{ch}</code> failed: <code>{exc}</code>",
                     )
 
-            # ── 6c. Optionally also send to user PM ───────────────────────
-            if do_forward_pm and first_msg:
+            # Optionally forward to PM
+            if do_forward_pm and pm_id is not None and first_msg:
                 try:
                     await client.send_video(
-                        chat_id=requesting_user_id,
+                        chat_id=pm_id,
                         video=first_msg.video.file_id,
-                        **base_kwargs,
+                        **base_kw,
                     )
-                    logger.info("PM copy of '%s' sent to user %d", new_name, requesting_user_id)
+                    logger.info("PM copy of '%s' → user %d", new_name, requesting_user_id)
                 except Exception as exc:
                     logger.error("PM forward failed for user %d: %s", requesting_user_id, exc)
 
         else:
-            # ── 6d. No channels set — send directly to PM ─────────────────
-            await client.send_video(
-                chat_id=requesting_user_id,
-                video=video_path,
-                progress=_progress,
-                **base_kwargs,
-            )
-            logger.info(
-                "Uploaded '%s' (dur=%ds %dx%d) → PM user %d",
-                new_name, duration, width, height, requesting_user_id,
-            )
+            # No channels — send directly to PM
+            if pm_id is not None:
+                await client.send_video(
+                    chat_id=pm_id,
+                    video=video_path,
+                    progress=_progress,
+                    **base_kw,
+                )
+                logger.info(
+                    "Uploaded '%s' (dur=%ds %dx%d) → PM user %d",
+                    new_name, duration, width, height, requesting_user_id,
+                )
+            else:
+                raise RuntimeError(
+                    f"Could not reach PM of user {requesting_user_id} "
+                    f"and no channels configured."
+                )
 
+        dest_label = (
+            "channel(s) + PM" if send_channels and do_forward_pm and pm_id else
+            "channel(s)"      if send_channels else
+            "PM"
+        )
         await _safe_edit(
             status_message,
-            f"✅ <b>Sent:</b> <code>{new_name}</code>"
-            + (" (channel + PM)" if send_channels and do_forward_pm else
-               " (channel only)" if send_channels else
-               " (PM)"),
+            f"✅ <b>Sent:</b> <code>{new_name}</code> → {dest_label}",
         )
 
     except Exception as exc:
@@ -201,6 +240,12 @@ async def upload_file(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _resolve_pm(client: Client, user_id: int):
+    """Thin wrapper — users use positive IDs, no prefix logic needed."""
+    from bot.utils.peer import resolve_peer_safe
+    return await resolve_peer_safe(client, user_id)
+
 
 async def _safe_edit(msg: Message, text: str) -> None:
     try:

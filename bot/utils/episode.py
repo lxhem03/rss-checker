@@ -95,7 +95,14 @@ def build_filename(
     title: str,
     filename: str,
     user_settings: Optional[Dict[str, Any]] = None,
+    replacements: Optional[list] = None,
 ) -> str:
+    # Apply -replace substitutions BEFORE regex so patterns can match
+    # the adjusted filename (e.g. 'Act II Second Season' → 'S04').
+    if replacements:
+        from bot.utils.arg_parser import apply_replacements
+        filename = apply_replacements(filename, replacements)
+
     season, episode = extract_season_episode(filename, user_settings)
 
     # Resolve templates
