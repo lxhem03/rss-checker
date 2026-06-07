@@ -2,18 +2,19 @@
 /rssfeed handler.
 
 Usage:
-    /rssfeed <feed_url> -title <Title>
+    /rssfeed <feed_url> -title <Title> [-replace orig:new] [-avoid kw1,kw2]
 
-On first add, ALL currently existing GUIDs in the feed are immediately
-marked as seen so the bot only downloads episodes that appear AFTER the
-feed was registered — never the backlog.
+-replace and -avoid are stored in MongoDB so they apply automatically
+on every future RSS check without re-entering.
+
+On first add, all currently-existing GUIDs are snapshotted so the bot
+never downloads the backlog.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from urllib.parse import urlparse
+from datetime import datetime, timezone
 
 import feedparser
 
@@ -21,10 +22,21 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from .auth import group_only
+from bot.utils.arg_parser import parse_args
 
 logger = logging.getLogger(__name__)
 
-_TITLE_RE = re.compile(r"-title\s+(.+?)(?:\s+-\w|$)", re.IGNORECASE | re.DOTALL)
+_USAGE = (
+    "⚠️ <b>Usage:</b>\n"
+    "<code>/rssfeed &lt;feed_url&gt; -title My Show</code>\n\n"
+    "<b>Optional flags:</b>\n"
+    "  <code>-replace original:replacement</code>  (repeatable)\n"
+    "  <code>-avoid keyword1,keyword2</code>        (repeatable)\n\n"
+    "<b>Examples:</b>\n"
+    "<code>/rssfeed https://nyaa.si/... -title Diamond no Ace "
+    "-replace Act II Second Season:S04</code>\n"
+    "<code>/rssfeed https://nyaa.si/... -title Yozakura -avoid REPACK,v2</code>"
+)
 
 
 def register(app: Client) -> None:
@@ -32,33 +44,25 @@ def register(app: Client) -> None:
     @app.on_message(filters.command("rssfeed"))
     @group_only
     async def rssfeed_handler(client: Client, message: Message):
-        raw = message.text or ""
+        raw       = message.text or ""
         args_text = raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else ""
+        args      = parse_args(args_text)
 
-        title_match = _TITLE_RE.search(args_text)
-        title = title_match.group(1).strip() if title_match else None
-        feed_url = _TITLE_RE.sub("", args_text).strip()
+        if not args.source:
+            await message.reply_text(_USAGE, quote=True)
+            return
 
-        if not feed_url:
+        if not args.title:
             await message.reply_text(
-                "⚠️ <b>Usage:</b> <code>/rssfeed &lt;feed_url&gt; -title My Show</code>",
+                "⚠️ You must provide <code>-title</code>.\n\n" + _USAGE,
                 quote=True,
             )
             return
 
-        if not title:
-            await message.reply_text(
-                "⚠️ You must provide <code>-title</code> with the feed command.\n"
-                "Example: <code>/rssfeed https://nyaa.si/?page=rss&amp;q=... -title Re:Zero</code>",
-                quote=True,
-            )
-            return
+        db      = client.db
+        user_id = message.from_user.id
 
-        db = client.db
-
-        # Check if already registered
-        from database import Database
-        existing = await db.feeds.find_one({"feed_url": feed_url, "user_id": message.from_user.id})
+        existing = await db.feeds.find_one({"feed_url": args.source, "user_id": user_id})
         if existing:
             await message.reply_text(
                 f"ℹ️ Feed already registered for <b>{existing['title']}</b>.",
@@ -66,14 +70,11 @@ def register(app: Client) -> None:
             )
             return
 
-        # ── Fetch the feed NOW to snapshot all current GUIDs ──────────────
-        status = await message.reply_text(
-            f"⏳ Fetching feed to snapshot current entries…", quote=True
-        )
+        status = await message.reply_text("⏳ Fetching feed to snapshot current entries…", quote=True)
 
         try:
             parsed = await asyncio.get_event_loop().run_in_executor(
-                None, feedparser.parse, feed_url
+                None, feedparser.parse, args.source
             )
         except Exception as exc:
             await status.edit_text(f"❌ Could not fetch feed:\n<code>{exc}</code>")
@@ -86,29 +87,38 @@ def register(app: Client) -> None:
             )
             return
 
-        # Collect every GUID that already exists in the feed right now
         existing_guids = []
         for entry in parsed.entries:
             guid = entry.get("id") or entry.get("link") or entry.get("title", "")
             if guid:
                 existing_guids.append(guid)
 
-        # ── Save feed with all current GUIDs pre-marked as seen ───────────
-        from datetime import datetime, timezone
         doc = {
-            "feed_url":   feed_url,
-            "title":      title,
-            "user_id":    message.from_user.id,
-            "added_at":   datetime.now(timezone.utc),
-            "seen_guids": existing_guids,   # ← backlog is immediately ignored
+            "feed_url":       args.source,
+            "title":          args.title,
+            "user_id":        user_id,
+            "added_at":       datetime.now(timezone.utc),
+            "seen_guids":     existing_guids,
+            # ── Stored per-feed so they apply on every future check ───────
+            "replacements":   [[o, r] for o, r in args.replacements],
+            "avoid_keywords": args.avoid_keywords,
         }
         await db.feeds.insert_one(doc)
 
-        entry_count = len(existing_guids)
+        # Build confirmation detail lines
+        extra = ""
+        if args.replacements:
+            pairs = ", ".join(f"<code>{o}</code> → <code>{r}</code>" for o, r in args.replacements)
+            extra += f"\n🔁 <b>Replace:</b> {pairs}"
+        if args.avoid_keywords:
+            kws = ", ".join(f"<code>{k}</code>" for k in args.avoid_keywords)
+            extra += f"\n🚫 <b>Avoid:</b> {kws}"
+
         await status.edit_text(
             f"✅ <b>RSS feed added!</b>\n\n"
-            f"📡 <b>Feed:</b> <code>{feed_url}</code>\n"
-            f"🏷️ <b>Title:</b> {title}\n"
-            f"📦 <b>Existing entries skipped:</b> {entry_count}\n\n"
-            f"<i>Only new episodes aired after this moment will be downloaded.</i>"
+            f"📡 <b>Feed:</b> <code>{args.source}</code>\n"
+            f"🏷️ <b>Title:</b> {args.title}\n"
+            f"📦 <b>Existing entries skipped:</b> {len(existing_guids)}"
+            f"{extra}\n\n"
+            f"<i>Only new episodes after this moment will be downloaded.</i>"
         )
