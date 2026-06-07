@@ -116,6 +116,10 @@ SEASON_EPISODE_PATTERNS = [
         re.compile(r'(?i)\b(?:ep|episode)[._\s-]*(\d{1,4})\b'),
         ('episode',),
     ),
+    (
+        re.compile(r'[Ss](\d{1,2})\s*[-\u2013\u2014]\s*(\d{2,3})(?=\s*[\[\(]|\s*$)'),
+        ('season', 'episode'),
+    )
 ]
 
 # ─────────────────────────────────────────
