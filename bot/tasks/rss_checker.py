@@ -1,22 +1,27 @@
 """
 RssCheckerTask — polls all saved RSS feeds on a fixed interval.
 
-On new entries:
-  • Notifies AUTH_GROUP
-  • Enqueues via DownloadManager with from_rss=True  (RSS dedup applies)
-  • Progress throttling and elapsed timer come from DownloadManager/uploader
+Per-feed stored fields used here:
+  replacements    list[[original, replacement], ...]
+  avoid_keywords  list[str]  (already lowercased)
+
+Logic per new entry:
+  1. Check entry title against avoid_keywords — skip if matched
+  2. Pass replacements to DownloadManager so they're applied to filenames
+     before season/episode extraction
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 import feedparser
 
 from config import RSS_CHECK_INTERVAL, AUTH_GROUPS
 from database import Database
+from bot.utils.arg_parser import should_avoid
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +39,6 @@ class RssCheckerTask:
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
-
-    # ── Main loop ─────────────────────────────────────────────────────────
 
     async def _loop(self) -> None:
         while True:
@@ -56,11 +59,18 @@ class RssCheckerTask:
         )
 
     async def _check_feed(self, feed: dict) -> None:
-        feed_url:   str  = feed["feed_url"]
-        title:      str  = feed["title"]
-        user_id:    int  = feed["user_id"]
-        feed_id          = feed["_id"]
-        seen_guids: list = feed.get("seen_guids", [])
+        feed_url:       str  = feed["feed_url"]
+        title:          str  = feed["title"]
+        user_id:        int  = feed["user_id"]
+        feed_id              = feed["_id"]
+        seen_guids:     list = feed.get("seen_guids", [])
+
+        # Load per-feed flags
+        raw_replacements = feed.get("replacements", [])
+        replacements: List[Tuple[str, str]] = [
+            (r[0], r[1]) for r in raw_replacements if isinstance(r, (list, tuple)) and len(r) == 2
+        ]
+        avoid_keywords: List[str] = feed.get("avoid_keywords", [])
 
         try:
             parsed = await asyncio.get_event_loop().run_in_executor(
@@ -82,21 +92,28 @@ class RssCheckerTask:
         logger.info("Feed '%s': %d new entry/entries found", title, len(new_entries))
 
         for guid, entry in new_entries:
-            # Mark seen immediately — if we crash mid-download it won't retry
             await self._db.mark_guid_seen(feed_id, guid)
+
+            entry_title = entry.get("title", guid)
+
+            # ── Avoid filter ──────────────────────────────────────────────
+            if avoid_keywords and should_avoid(entry_title, avoid_keywords):
+                logger.info(
+                    "Feed '%s': skipping '%s' (matched avoid keyword)", title, entry_title
+                )
+                continue
 
             torrent_url = _extract_torrent_link(entry)
             if not torrent_url:
-                logger.warning(
-                    "No torrent link in entry '%s', skipping", entry.get("title", guid)
-                )
+                logger.warning("No torrent link in entry '%s', skipping", entry_title)
                 continue
 
             await self._enqueue(
                 torrent_url=torrent_url,
                 title=title,
                 user_id=user_id,
-                entry_title=entry.get("title", guid),
+                entry_title=entry_title,
+                replacements=replacements,
             )
 
     async def _enqueue(
@@ -105,8 +122,8 @@ class RssCheckerTask:
         title: str,
         user_id: int,
         entry_title: str,
+        replacements: List[Tuple[str, str]],
     ) -> None:
-        """Send notification then hand off to DownloadManager (from_rss=True)."""
         if not AUTH_GROUPS:
             logger.error("No AUTH_GROUPS configured — cannot send RSS notification")
             return
@@ -120,14 +137,17 @@ class RssCheckerTask:
                     f"📡 <b>New RSS entry!</b>\n"
                     f"🏷️ <b>Show:</b> {title}\n"
                     f"📄 <b>Entry:</b> <code>{entry_title}</code>\n"
-                    f"⏳ Queueing download…"
+                    + (
+                        "🔁 <b>Replacements active</b>\n"
+                        if replacements else ""
+                    )
+                    + "⏳ Queueing download…"
                 ),
             )
         except Exception as exc:
             logger.error("Could not notify group %s: %s", group_id, exc)
             return
 
-        # Build a minimal message stand-in so DownloadManager can reply to it
         app_ref = self._app
 
         class _FakeMessage:
@@ -153,36 +173,27 @@ class RssCheckerTask:
             title=title,
             source=torrent_url,
             torrent_file_id=None,
-            from_rss=True,          # ← enables RSS dedup, throttled progress
+            from_rss=True,
+            replacements=replacements,
+            avoid_keywords=[],   # already filtered above
         )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 def _extract_torrent_link(entry: dict) -> Optional[str]:
-    """Find a .torrent URL or magnet link from a feedparser entry."""
-    # 1. Enclosures (most common in Nyaa)
     for enc in entry.get("enclosures", []):
         href = enc.get("href") or enc.get("url", "")
         if href and (_is_torrent(href) or href.startswith("magnet:")):
             return href
-
-    # 2. links array
     for lnk in entry.get("links", []):
         href = lnk.get("href", "")
         if href and (_is_torrent(href) or href.startswith("magnet:")):
             return href
-
-    # 3. Direct entry link
     link = entry.get("link", "")
     if link and (_is_torrent(link) or link.startswith("magnet:")):
         return link
-
-    # 4. Nyaa RSS extension tag
     magnet = entry.get("nyaa_magnetlink", "")
     if magnet:
         return magnet
-
     return None
 
 
