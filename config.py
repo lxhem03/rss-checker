@@ -5,9 +5,9 @@ import re
 # ─────────────────────────────────────────
 #  Telegram credentials
 # ─────────────────────────────────────────
-API_ID: int = int(os.environ.get("API_ID", 0))
-API_HASH: str = os.environ.get("API_HASH", "")
-BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
+API_ID: int = os.environ.get("API_ID", 39545686)
+API_HASH: str = os.environ.get("API_HASH", "0ed4ebf411d1dc0fc63b821a08ad889b")
+BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "8262033916:AAFlb2qdHFb155tm17OijcwRSx2b_zil4iA")
 
 # ─────────────────────────────────────────
 #  Access control
@@ -15,21 +15,21 @@ BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "")
 # Comma-separated user IDs in env, e.g. "123456,789012"
 AUTH_USERS: List[int] = [
     int(uid.strip())
-    for uid in os.environ.get("AUTH_USERS", "").split(",")
+    for uid in os.environ.get("AUTH_USERS", "7465574522").split(",")
     if uid.strip().isdigit()
 ]
 
 # Comma-separated group/channel IDs (negative for groups), e.g. "-1001234567890"
 AUTH_GROUPS: List[int] = [
     int(gid.strip())
-    for gid in os.environ.get("AUTH_GROUPS", "").split(",")
+    for gid in os.environ.get("AUTH_GROUPS", "-1003986350493").split(",")
     if gid.strip().lstrip("-").isdigit()
 ]
 
 # ─────────────────────────────────────────
 #  MongoDB
 # ─────────────────────────────────────────
-MONGO_URI: str = os.environ.get("MONGO_URI", "")
+MONGO_URI: str = os.environ.get("MONGO_URI", "mongodb+srv://itzmikeyhere21:oa9L3ts4reFl3uWH@demonstration.a1im111.mongodb.net/?appName=demonstration")
 MONGO_DB: str = os.environ.get("MONGO_DB", "rss_bot")
 
 # ─────────────────────────────────────────
@@ -41,7 +41,7 @@ DOWNLOAD_DIR: str = os.environ.get("DOWNLOAD_DIR", "/tmp/downloads")
 MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "3"))
 
 # Pyrogram upload workers (increases upload throughput)
-WORKERS: int = int(os.environ.get("WORKERS", "4"))
+WORKERS: int = int(os.environ.get("WORKERS", "5"))
 
 # Parallel chunk transmissions per file upload.
 # 1  = default Pyrogram (slow, sequential chunks)
