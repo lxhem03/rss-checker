@@ -38,10 +38,10 @@ MONGO_DB: str = os.environ.get("MONGO_DB", "rss_bot")
 DOWNLOAD_DIR: str = os.environ.get("DOWNLOAD_DIR", "/tmp/downloads")
 
 # How many torrent download workers run in parallel
-MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "3"))
+MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "5"))
 
 # Pyrogram upload workers (increases upload throughput)
-WORKERS: int = int(os.environ.get("WORKERS", "5"))
+WORKERS: int = int(os.environ.get("WORKERS", "4"))
 
 # Parallel chunk transmissions per file upload.
 # 1  = default Pyrogram (slow, sequential chunks)
@@ -126,4 +126,4 @@ SEASON_EPISODE_PATTERNS = [
 #  Output filename template
 # ─────────────────────────────────────────
 FILENAME_TEMPLATE: str = "{title} - S{season:02d}E{episode:02d}.mkv"
-FILENAME_TEMPLATE_NO_SEASON: str = "{title} - E{episode:02d}.mkv"
+FILENAME_TEMPLATE_NO_SEASON: str = "{title} - S01E{episode:02d}.mkv"
