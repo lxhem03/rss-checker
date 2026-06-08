@@ -7,7 +7,7 @@ import re
 # ─────────────────────────────────────────
 API_ID: int = os.environ.get("API_ID", 39545686)
 API_HASH: str = os.environ.get("API_HASH", "0ed4ebf411d1dc0fc63b821a08ad889b")
-BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "8262033916:AAFlb2qdHFb155tm17OijcwRSx2b_zil4iA")
+BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "8475283916:AAEHfAD0Dn7W7VGPt6HOXmG6KJae-EmBzwA")
 
 # ─────────────────────────────────────────
 #  Access control
