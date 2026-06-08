@@ -22,7 +22,7 @@ AUTH_USERS: List[int] = [
 # Comma-separated group/channel IDs (negative for groups), e.g. "-1001234567890"
 AUTH_GROUPS: List[int] = [
     int(gid.strip())
-    for gid in os.environ.get("AUTH_GROUPS", "-1003986350493").split(",")
+    for gid in os.environ.get("AUTH_GROUPS", "-1003917873343").split(",")
     if gid.strip().lstrip("-").isdigit()
 ]
 
