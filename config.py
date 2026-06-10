@@ -38,7 +38,7 @@ MONGO_DB: str = os.environ.get("MONGO_DB", "rss_bot")
 DOWNLOAD_DIR: str = os.environ.get("DOWNLOAD_DIR", "/tmp/downloads")
 
 # How many torrent download workers run in parallel
-MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "5"))
+MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "10"))
 
 # Pyrogram upload workers (increases upload throughput)
 WORKERS: int = int(os.environ.get("WORKERS", "4"))
@@ -59,6 +59,9 @@ MAX_UPLOAD_RATE: int = int(os.environ.get("MAX_UPLOAD_RATE", "0"))
 # ─────────────────────────────────────────
 # How often to poll feeds, in seconds (between 60 and 300)
 RSS_CHECK_INTERVAL: int = max(60, min(300, int(os.environ.get("RSS_CHECK_INTERVAL", "120"))))
+# How many feeds are fetched in parallel during each check cycle.
+# Set to at least the number of feeds you have for maximum speed.
+RSS_FETCH_WORKERS: int = int(os.environ.get("RSS_FETCH_WORKERS", "20"))
 
 # ─────────────────────────────────────────
 #  Season / Episode patterns
@@ -127,3 +130,7 @@ SEASON_EPISODE_PATTERNS = [
 # ─────────────────────────────────────────
 FILENAME_TEMPLATE: str = "{title} - S{season:02d}E{episode:02d}.mkv"
 FILENAME_TEMPLATE_NO_SEASON: str = "{title} - S01E{episode:02d}.mkv"
+
+# Koyeb injects $PORT automatically; we default to 8080 for local dev.
+# Set this to whatever port your Koyeb service is configured to expose.
+HEALTH_CHECK_PORT: int = int(os.environ.get("PORT", "8080"))
