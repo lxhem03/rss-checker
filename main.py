@@ -1,3 +1,4 @@
+# ── uvloop + event loop setup — MUST happen before any pyrogram import ────────
 try:
     import uvloop
     import asyncio
@@ -12,17 +13,18 @@ except ImportError:
 import logging
 import os
 
-from pyrogram import Client, utils
+from pyrogram import Client
 from pyrogram.enums import ParseMode
 
 from config import (
     API_ID, API_HASH, BOT_TOKEN,
     WORKERS, MAX_CONCURRENT_TRANSMISSIONS,
-    DOWNLOAD_DIR,
+    DOWNLOAD_DIR, HEALTH_CHECK_PORT,
 )
 from bot.handlers import register_handlers
 from bot.tasks.rss_checker import RssCheckerTask
 from bot.utils.downloader import DownloadManager
+from bot.utils.health import start_health_server
 from database import Database
 
 logging.basicConfig(
@@ -34,19 +36,20 @@ logger = logging.getLogger(__name__)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-utils.MIN_CHAT_ID = -999999999999
-utils.MIN_CHANNEL_ID = -100999999999999
-
 
 async def main() -> None:
-    # ── Database — fail fast if URI is wrong ──────────────────────────────
+    # ── Health check server (required by Koyeb / any HTTP-health PaaS) ───
+    # Starts immediately so the platform sees the port open within its
+    # startup timeout, even before the bot connects to Telegram.
+    await start_health_server(HEALTH_CHECK_PORT)
+
+    # ── Database ──────────────────────────────────────────────────────────
     db = Database()
     try:
         await db.connect()
     except Exception as exc:
         logger.critical(
             "Could not connect to MongoDB: %s\n"
-            "Check that MONGO_URI is set correctly in your Heroku config vars.\n"
             "It should look like: mongodb+srv://user:pass@cluster.mongodb.net/",
             exc,
         )
@@ -75,7 +78,8 @@ async def main() -> None:
         await rss_task.start()
 
         loop_name = type(asyncio.get_event_loop()).__name__
-        logger.info("✅ Bot is live. Event loop: %s", loop_name)
+        logger.info("✅ Bot is live. Event loop: %s | Health port: %d",
+                    loop_name, HEALTH_CHECK_PORT)
         await asyncio.Event().wait()
 
 
