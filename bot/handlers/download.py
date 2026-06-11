@@ -2,12 +2,11 @@
 /download handler.
 
 Usage:
-    /download <magnet|url> -title <Title> [-replace orig:new] [-avoid kw1,kw2]
-    /download -title <Title> [-replace orig:new]   (reply to .torrent file)
+    /download <magnet|url> -title <Title> [-replace orig:new] [-avoid kw]
+    /download -title <Title>   (reply to .torrent file)
 
--replace  applied to filename before season/episode extraction
--avoid    for /download this filters nothing (you chose the torrent yourself)
-          but is accepted and silently ignored so the syntax is consistent
+If a .torrent URL returns 504 after retries, the error message tells the
+user to try the magnet link instead.
 """
 from __future__ import annotations
 
@@ -26,7 +25,9 @@ _USAGE = (
     "<code>/download &lt;magnet|url&gt; -title My Show</code>\n\n"
     "<b>Optional flags:</b>\n"
     "  <code>-replace original:replacement</code>  (repeatable)\n"
-    "  <code>-avoid keyword1,keyword2</code>        (repeatable)"
+    "  <code>-avoid keyword1,keyword2</code>\n\n"
+    "💡 <b>Tip:</b> If a <code>.torrent</code> URL returns a timeout error, "
+    "use the magnet link instead — it bypasses the download server entirely."
 )
 
 
@@ -39,7 +40,6 @@ def register(app: Client) -> None:
         args_text = raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else ""
         args      = parse_args(args_text)
 
-        # Handle reply-to-.torrent-file
         torrent_file_id = None
         if message.reply_to_message and message.reply_to_message.document:
             doc = message.reply_to_message.document
@@ -58,6 +58,16 @@ def register(app: Client) -> None:
             )
             return
 
+        # Warn the user upfront if they gave a .torrent URL (not magnet)
+        # so they know what to do if a 504 occurs
+        source = args.source or ""
+        if source.startswith(("http://", "https://")) and ".torrent" in source:
+            await message.reply_text(
+                "ℹ️ Fetching <code>.torrent</code> file… "
+                "If this times out, cancel and retry with the magnet link.",
+                quote=True,
+            )
+
         await client.download_manager.enqueue(
             client=client,
             message=message,
@@ -65,5 +75,5 @@ def register(app: Client) -> None:
             source=args.source,
             torrent_file_id=torrent_file_id,
             replacements=args.replacements,
-            avoid_keywords=[],          # not meaningful for manual /download
+            avoid_keywords=[],
         )
