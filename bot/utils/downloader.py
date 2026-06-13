@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pyrogram import Client
 from pyrogram.types import Message
 
-from config import DOWNLOAD_DIR, MAX_PARALLEL_DOWNLOADS
+from config import DOWNLOAD_DIR, MAX_PARALLEL_DOWNLOADS, MAX_PARALLEL_UPLOADS
 from bot.utils.torrent import download_torrent
 from bot.utils.uploader import upload_file
 from bot.utils.episode import extract_season_episode
@@ -68,6 +68,9 @@ class DownloadManager:
         self._client = client
         self._jobs: Dict[str, DownloadJob] = {}
         self._semaphore = asyncio.Semaphore(MAX_PARALLEL_DOWNLOADS)
+        # Global upload semaphore shared across ALL concurrent jobs.
+        # Caps simultaneous Telegram uploads to avoid FloodWait.
+        self._upload_semaphore = asyncio.Semaphore(MAX_PARALLEL_UPLOADS)
 
     async def enqueue(
         self,
@@ -238,6 +241,7 @@ class DownloadManager:
                     await _upload_one(
                         client, vf, job, ep_key, file_status,
                         channels, do_pm, user_settings, db,
+                        self._upload_semaphore,
                     )
                     uploaded += 1
 
@@ -268,26 +272,31 @@ class DownloadManager:
 async def _upload_one(
     client, video_path, job, ep_key, file_status,
     channels, do_pm, user_settings, db,
+    upload_semaphore: asyncio.Semaphore,
 ) -> None:
-    try:
-        await upload_file(
-            client=client,
-            video_path=video_path,
-            title=job.title,
-            requesting_user_id=job.user_id,
-            status_message=file_status,
-            channels=channels,
-            do_forward_pm=do_pm,
-            user_settings=user_settings,
-            replacements=job.replacements,   # ← passed to uploader/episode
-        )
-        await db.mark_downloaded(job.title, ep_key, job.user_id)
-    except Exception as exc:
-        logger.exception("Upload failed for %s", video_path)
+    # Acquire the global upload semaphore before sending anything to
+    # Telegram. This caps concurrent uploads across ALL jobs at
+    # MAX_PARALLEL_UPLOADS and prevents FloodWait errors.
+    async with upload_semaphore:
         try:
-            await file_status.edit_text(f"❌ Upload failed: <code>{exc}</code>")
-        except Exception:
-            pass
+            await upload_file(
+                client=client,
+                video_path=video_path,
+                title=job.title,
+                requesting_user_id=job.user_id,
+                status_message=file_status,
+                channels=channels,
+                do_forward_pm=do_pm,
+                user_settings=user_settings,
+                replacements=job.replacements,
+            )
+            await db.mark_downloaded(job.title, ep_key, job.user_id)
+        except Exception as exc:
+            logger.exception("Upload failed for %s", video_path)
+            try:
+                await file_status.edit_text(f"❌ Upload failed: <code>{exc}</code>")
+            except Exception:
+                pass
 
 
 async def _safe_edit(msg: Message, text: str) -> None:
