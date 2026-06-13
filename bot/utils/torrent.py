@@ -35,45 +35,41 @@ MAX_TORRENT_FETCH_RETRIES = 3  # how many times to retry a failed .torrent URL
 def _make_session() -> lt.session:
     ses = lt.session()
     settings: dict = {
-        # ── Concurrency ───────────────────────────────────────────────────
-        "active_downloads":         6,
-        "active_seeds":             0,   # we don't seed — free CPU/upload
-        "active_limit":             6,
+        # ── Concurrency — keep high for speed ────────────────────────────
+        "active_downloads":         10,
+        "active_seeds":             0,    # not seeding — saves upload BW
+        "active_limit":             10,
 
-        # ── Connection limits — fewer connections = less CPU overhead ─────
-        "connections_limit":        100, # global cap (default ~200)
-        "connection_speed":         10,  # new connections per second
+        # ── Connections — keep generous for speed ─────────────────────────
+        # Cutting this was the main cause of the 45 KB/s regression.
+        # 500 is a reasonable cap that still gives plenty of peers.
+        "connections_limit":        500,
+        "connection_speed":         50,
 
-        # ── Piece / cache settings — reduce RAM usage ─────────────────────
-        # cache_size is in 16 KiB blocks; 512 blocks = 8 MB read cache
-        "cache_size":               512,
-        "use_read_cache":           True,
-
-        # ── Disable services we don't need (each saves CPU + RAM) ─────────
-        "enable_dht":               False,  # we have trackers; no DHT needed
-        "enable_lsd":               False,  # local service discovery — useless on VPS
-        "enable_upnp":              False,  # no NAT traversal needed on VPS
-        "enable_natpmp":            False,
-
-        # ── Choking / unchoke — we only download, don't serve ────────────
-        "unchoke_slots_limit":      0,
-
-        # ── Timeouts ─────────────────────────────────────────────────────
-        "peer_connect_timeout":     10,
-        "request_timeout":          30,
-
-        # ── Announce ─────────────────────────────────────────────────────
+        # ── Announce to all trackers for maximum peer discovery ───────────
         "announce_to_all_tiers":    True,
         "announce_to_all_trackers": True,
+
+        # ── Keep DHT ON — critical for peer discovery on many torrents ────
+        # Disabling it was the other cause of the speed regression.
+        "enable_dht":               True,
+
+        # ── Disable only the things that are truly useless on a VPS ───────
+        "enable_lsd":               False,  # LAN peer discovery — pointless
+        "enable_upnp":              False,  # NAT traversal — not needed
+        "enable_natpmp":            False,  # same
+
+        # ── Don't serve upload to peers (we only download) ────────────────
+        "unchoke_slots_limit":      0,
+
+        # ── Timeouts ──────────────────────────────────────────────────────
+        "peer_connect_timeout":     10,
+        "request_timeout":          30,
     }
     if MAX_DOWNLOAD_RATE:
         settings["download_rate_limit"] = MAX_DOWNLOAD_RATE
     if MAX_UPLOAD_RATE:
         settings["upload_rate_limit"] = MAX_UPLOAD_RATE
-    else:
-        # Even with no explicit limit, cap upload to save bandwidth
-        # since we're a downloader, not a seeder
-        settings["upload_rate_limit"] = 50 * 1024   # 50 KB/s max upload
 
     ses.apply_settings(settings)
     return ses
