@@ -88,12 +88,21 @@ async def upload_file(
         # ── 4. Throttled progress callback ────────────────────────────────
         upload_start   = time.monotonic()
         last_edit_t    = [0.0]
-        last_edit_pct  = [-1.0]
+        last_edit_pct  = [-1.0]   # highest pct seen — never goes backwards
         last_edit_text = [""]
+        peak_current   = [0]      # highest bytes seen — never goes backwards
 
         async def _progress(current: int, total: int) -> None:
-            now     = time.monotonic()
-            pct     = current / total * 100 if total else 0
+            now = time.monotonic()
+
+            # Pyrogram resets current→0 when it retries a failed chunk.
+            # Clamp to the highest value we have seen so the bar never
+            # goes backwards and the user doesn't see confusing resets.
+            if current > peak_current[0]:
+                peak_current[0] = current
+            display_current = peak_current[0]
+
+            pct     = display_current / total * 100 if total else 0
             elapsed = int(now - upload_start)
             time_ok = (now - last_edit_t[0]) >= _UPLOAD_MIN_INTERVAL
             pct_ok  = (pct - last_edit_pct[0]) >= _UPLOAD_PCT_STEP
@@ -103,7 +112,7 @@ async def upload_file(
             text = (
                 f"📤 <b>Uploading:</b> <code>{new_name}</code>\n"
                 f"{bar} {pct:.1f}%\n"
-                f"{_human_size(current)} / {_human_size(total)}"
+                f"{_human_size(display_current)} / {_human_size(total)}"
                 f"  |  🕐 {_fmt_elapsed(elapsed)}"
             )
             if text == last_edit_text[0]:

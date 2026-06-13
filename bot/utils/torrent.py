@@ -35,13 +35,46 @@ MAX_TORRENT_FETCH_RETRIES = 3  # how many times to retry a failed .torrent URL
 def _make_session() -> lt.session:
     ses = lt.session()
     settings: dict = {
-        "active_downloads": 10,
-        "active_seeds":     4,
+        # ── Concurrency ───────────────────────────────────────────────────
+        "active_downloads":         6,
+        "active_seeds":             0,   # we don't seed — free CPU/upload
+        "active_limit":             6,
+
+        # ── Connection limits — fewer connections = less CPU overhead ─────
+        "connections_limit":        100, # global cap (default ~200)
+        "connection_speed":         10,  # new connections per second
+
+        # ── Piece / cache settings — reduce RAM usage ─────────────────────
+        # cache_size is in 16 KiB blocks; 512 blocks = 8 MB read cache
+        "cache_size":               512,
+        "use_read_cache":           True,
+
+        # ── Disable services we don't need (each saves CPU + RAM) ─────────
+        "enable_dht":               False,  # we have trackers; no DHT needed
+        "enable_lsd":               False,  # local service discovery — useless on VPS
+        "enable_upnp":              False,  # no NAT traversal needed on VPS
+        "enable_natpmp":            False,
+
+        # ── Choking / unchoke — we only download, don't serve ────────────
+        "unchoke_slots_limit":      0,
+
+        # ── Timeouts ─────────────────────────────────────────────────────
+        "peer_connect_timeout":     10,
+        "request_timeout":          30,
+
+        # ── Announce ─────────────────────────────────────────────────────
+        "announce_to_all_tiers":    True,
+        "announce_to_all_trackers": True,
     }
     if MAX_DOWNLOAD_RATE:
         settings["download_rate_limit"] = MAX_DOWNLOAD_RATE
     if MAX_UPLOAD_RATE:
         settings["upload_rate_limit"] = MAX_UPLOAD_RATE
+    else:
+        # Even with no explicit limit, cap upload to save bandwidth
+        # since we're a downloader, not a seeder
+        settings["upload_rate_limit"] = 50 * 1024   # 50 KB/s max upload
+
     ses.apply_settings(settings)
     return ses
 
