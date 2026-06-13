@@ -39,6 +39,10 @@ DOWNLOAD_DIR: str = os.environ.get("DOWNLOAD_DIR", "/tmp/downloads")
 
 # How many torrent download workers run in parallel
 MAX_PARALLEL_DOWNLOADS: int = int(os.environ.get("MAX_PARALLEL_DOWNLOADS", "10"))
+# Max simultaneous file uploads across ALL jobs.
+# Keep this low (2-3) to avoid Telegram FloodWait errors.
+# Downloads can still run in parallel — only the upload step is throttled.
+MAX_PARALLEL_UPLOADS: int = int(os.environ.get("MAX_PARALLEL_UPLOADS", "2"))
 
 # Pyrogram upload workers (increases upload throughput)
 WORKERS: int = int(os.environ.get("WORKERS", "4"))
