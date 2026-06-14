@@ -109,6 +109,7 @@ class RssCheckerTask:
             if isinstance(r, (list, tuple)) and len(r) == 2
         ]
         avoid_keywords: List[str] = feed.get("avoid_keywords", [])
+        no_season:      bool       = bool(feed.get("no_season", False))
 
         try:
             parsed = await self._fetch_feed(feed_url)
@@ -178,6 +179,7 @@ class RssCheckerTask:
                 user_id=user_id,
                 entry_title=entry_title,
                 replacements=replacements,
+                no_season=no_season,
             )
 
     async def _enqueue(
@@ -187,6 +189,7 @@ class RssCheckerTask:
         user_id: int,
         entry_title: str,
         replacements: List[Tuple[str, str]],
+        no_season: bool = False,
     ) -> None:
         if not AUTH_GROUPS:
             logger.error("No AUTH_GROUPS configured — cannot notify")
@@ -236,6 +239,7 @@ class RssCheckerTask:
             from_rss=True,
             replacements=replacements,
             avoid_keywords=[],
+            no_season=no_season,
         )
 
 
