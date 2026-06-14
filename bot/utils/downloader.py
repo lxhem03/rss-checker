@@ -55,6 +55,7 @@ class DownloadJob:
     torrent_file_id: Optional[str]
     group_chat_id: int
     from_rss: bool = False
+    no_season: bool = False
     replacements: List[Tuple[str, str]] = field(default_factory=list)
     progress: float = 0.0
     speed: str = "0 B/s"
@@ -82,6 +83,7 @@ class DownloadManager:
         from_rss: bool = False,
         replacements: Optional[List[Tuple[str, str]]] = None,
         avoid_keywords: Optional[List[str]] = None,   # accepted but not used here
+        no_season: bool = False,
     ) -> str:
         job_id = uuid.uuid4().hex[:8]
         job = DownloadJob(
@@ -92,6 +94,7 @@ class DownloadManager:
             torrent_file_id=torrent_file_id,
             group_chat_id=message.chat.id,
             from_rss=from_rss,
+            no_season=no_season,
             replacements=replacements or [],
         )
         self._jobs[job_id] = job
@@ -180,12 +183,48 @@ class DownloadManager:
                         f"⚡ {speed}  |  ⏱ ETA: {eta}  |  🕐 {_fmt_elapsed(elapsed)}",
                     )
 
-                all_files = await download_torrent(
-                    source=source,
-                    dest_dir=job_dir,
-                    on_progress=on_progress,
-                    cancelled_event=job.cancelled,
-                )
+                # ── Download with job-level retry ─────────────────────
+                # If the torrent source fails (e.g. Nyaa 504/404) we wait
+                # and retry the whole download up to JOB_DOWNLOAD_RETRIES
+                # times. The magnet-derivation in torrent.py handles most
+                # cases, but this catches anything that slips through.
+                JOB_DOWNLOAD_RETRIES = 3
+                JOB_RETRY_WAIT       = 180  # 3 minutes between retries
+
+                all_files = None
+                last_dl_exc = None
+                for dl_attempt in range(1, JOB_DOWNLOAD_RETRIES + 1):
+                    try:
+                        all_files = await download_torrent(
+                            source=source,
+                            dest_dir=job_dir,
+                            on_progress=on_progress,
+                            cancelled_event=job.cancelled,
+                        )
+                        break  # success
+                    except asyncio.CancelledError:
+                        raise  # don't retry cancellations
+                    except Exception as dl_exc:
+                        last_dl_exc = dl_exc
+                        if dl_attempt < JOB_DOWNLOAD_RETRIES:
+                            logger.warning(
+                                "Job %s download attempt %d/%d failed: %s — "
+                                "retrying in %ds",
+                                job.id, dl_attempt, JOB_DOWNLOAD_RETRIES,
+                                dl_exc, JOB_RETRY_WAIT,
+                            )
+                            await _safe_edit(
+                                status_msg,
+                                f"⚠️ <b>Download failed (attempt {dl_attempt}/{JOB_DOWNLOAD_RETRIES}):</b>\n"
+                                f"<code>{dl_exc}</code>\n"
+                                f"⏳ Retrying in {JOB_RETRY_WAIT // 60} minutes…",
+                            )
+                            await asyncio.sleep(JOB_RETRY_WAIT)
+                            # Reset progress state for the next attempt
+                            last_edit_t[0]   = 0.0
+                            last_edit_pct[0] = 0.0
+                        else:
+                            raise last_dl_exc
 
                 raw_videos = [
                     f for f in all_files
@@ -242,6 +281,7 @@ class DownloadManager:
                         client, vf, job, ep_key, file_status,
                         channels, do_pm, user_settings, db,
                         self._upload_semaphore,
+                        job.no_season,
                     )
                     uploaded += 1
 
@@ -273,6 +313,7 @@ async def _upload_one(
     client, video_path, job, ep_key, file_status,
     channels, do_pm, user_settings, db,
     upload_semaphore: asyncio.Semaphore,
+    no_season: bool = False,
 ) -> None:
     # Acquire the global upload semaphore before sending anything to
     # Telegram. This caps concurrent uploads across ALL jobs at
@@ -289,6 +330,7 @@ async def _upload_one(
                 do_forward_pm=do_pm,
                 user_settings=user_settings,
                 replacements=job.replacements,
+                no_season=no_season,
             )
             await db.mark_downloaded(job.title, ep_key, job.user_id)
         except Exception as exc:

@@ -46,6 +46,7 @@ async def upload_file(
     do_forward_pm: bool = True,
     user_settings: Optional[Dict[str, Any]] = None,
     replacements: Optional[List[Tuple[str, str]]] = None,
+    no_season: bool = False,
 ) -> None:
     base_dir  = os.path.dirname(video_path)
     stem      = os.path.splitext(os.path.basename(video_path))[0]
@@ -61,6 +62,7 @@ async def upload_file(
             os.path.basename(video_path),
             user_settings=user_settings,
             replacements=replacements or [],
+            no_season=no_season,
         )
         new_path = os.path.join(base_dir, new_name)
         if os.path.abspath(video_path) != os.path.abspath(new_path):
@@ -135,71 +137,96 @@ async def upload_file(
         )
         base_kw = {k: v for k, v in base_kw.items() if v is not None}
 
+        # base_kw WITHOUT progress — used for all file_id forwards so
+        # Pyrogram does NOT trigger the progress callback a second time.
+        # file_id sends are instant Telegram-side copies, not real uploads.
+        forward_kw = {k: v for k, v in base_kw.items()}
+
         send_channels: List[int] = list(channels) if channels else []
 
         # ── 6. Deliver ────────────────────────────────────────────────────
-        first_msg = None
+        # Strategy:
+        #   • ONE real upload (file bytes → Telegram) — always to the first
+        #     destination, with the progress bar attached.
+        #   • ALL other destinations receive an instant file_id forward —
+        #     no re-upload, no second progress bar, takes < 1 second each.
+        #
+        # Delivery order:
+        #   channels set  + PM on  → upload to ch[0], forward ch[1..N], forward PM
+        #   channels set  + PM off → upload to ch[0], forward ch[1..N]
+        #   no channels   + PM on  → upload directly to PM
+        #   no channels   + PM off → upload directly to PM (PM is always fallback)
+
+        first_msg  = None
+        first_dest = None   # where the real upload went — for logging
 
         if send_channels:
-            # Full upload to first channel
+            first_dest = send_channels[0]
             try:
+                # ── Real upload (one time only) ───────────────────────────
                 first_msg = await client.send_video(
-                    chat_id=send_channels[0],
-                    video=video_path,
-                    progress=_progress,
+                    chat_id=first_dest,
+                    video=video_path,       # actual file bytes
+                    progress=_progress,     # progress bar shown here only
                     **base_kw,
                 )
-                logger.info("Uploaded '%s' to channel %d", new_name, send_channels[0])
+                logger.info("Uploaded '%s' to channel %d", new_name, first_dest)
             except Exception as exc:
-                logger.error("Upload to channel %d failed: %s", send_channels[0], exc)
+                logger.error("Upload to channel %d failed: %s", first_dest, exc)
                 await _safe_edit(
                     status_message,
-                    f"⚠️ Upload to channel <code>{send_channels[0]}</code> failed: "
-                    f"<code>{exc}</code>\nFalling back to PM…",
+                    f"⚠️ Channel <code>{first_dest}</code> upload failed: "
+                    f"<code>{exc}</code>\n📨 Sending to PM instead…",
                 )
-                # Fall back to PM upload so the file isn't lost
-                await client.send_video(
+                # Channel failed — upload directly to PM as fallback.
+                # Reset peak_current so the progress bar starts fresh.
+                peak_current[0]  = 0
+                last_edit_pct[0] = -1.0
+                first_msg = await client.send_video(
                     chat_id=requesting_user_id,
                     video=video_path,
                     progress=_progress,
                     **base_kw,
                 )
-                return
+                first_dest = requesting_user_id
+                logger.info("Fallback upload to PM for user %d", requesting_user_id)
 
-            # Forward by file_id to remaining channels
+            # ── Forward by file_id to remaining channels ──────────────────
+            # Instant Telegram-side copy — no re-upload, no progress bar.
             for ch in send_channels[1:]:
                 try:
                     await client.send_video(
                         chat_id=ch,
                         video=first_msg.video.file_id,
-                        **base_kw,
+                        **forward_kw,       # no progress= here
                     )
-                    logger.info("Forwarded '%s' to channel %d", new_name, ch)
+                    logger.info("Forwarded '%s' → channel %d", new_name, ch)
                 except Exception as exc:
-                    logger.error("Forward to channel %d failed: %s", ch, exc)
+                    logger.error("Forward to %d failed: %s", ch, exc)
                     await _safe_edit(
                         status_message,
                         f"⚠️ Forward to <code>{ch}</code> failed: <code>{exc}</code>",
                     )
 
-            # Optionally forward to PM
-            if do_forward_pm and first_msg:
+            # ── Forward to PM (instant, no re-upload) ─────────────────────
+            if do_forward_pm and first_dest != requesting_user_id:
                 try:
                     await client.send_video(
                         chat_id=requesting_user_id,
                         video=first_msg.video.file_id,
-                        **base_kw,
+                        **forward_kw,       # no progress= here
                     )
-                    logger.info("PM copy of '%s' → user %d", new_name, requesting_user_id)
+                    logger.info("Forwarded '%s' → PM user %d", new_name, requesting_user_id)
                 except Exception as exc:
                     logger.error("PM forward failed for user %d: %s", requesting_user_id, exc)
 
         else:
-            # No channels — send directly to PM
-            await client.send_video(
+            # No channels configured — single upload directly to PM
+            first_dest = requesting_user_id
+            first_msg  = await client.send_video(
                 chat_id=requesting_user_id,
                 video=video_path,
-                progress=_progress,
+                progress=_progress,     # progress bar shown here only
                 **base_kw,
             )
             logger.info(

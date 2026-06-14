@@ -4,7 +4,8 @@ Shared command argument parser for /download and /rssfeed.
 Supported flags (all optional except -title):
   -title   <Show Title>
   -replace <original:replacement>   (repeatable)
-  -avoid   <keyword1,keyword2,...>  (repeatable, comma-separated within each flag)
+  -avoid    <keyword1,keyword2,...>  (repeatable, comma-separated within each flag)
+  -noseason                          (flag, no value — forces episode-only filename)
 
 Examples:
   /download <url> -title "Diamond no Ace" -replace "Act II Second Season:S04"
@@ -32,13 +33,17 @@ class ParsedArgs:
     title: Optional[str]
     replacements: List[Tuple[str, str]]    # [(original, replacement), ...]
     avoid_keywords: List[str]              # lowercased, stripped
+    no_season: bool = False                # -noseason flag
 
 
 # Matches a flag name and captures everything until the next flag or EOL
+# Matches value-bearing flags
 _FLAG_RE = re.compile(
-    r'-(?P<flag>title|replace|avoid)\s+(?P<value>.+?)(?=\s+-(?:title|replace|avoid)\s|\s*$)',
+    r'-(?P<flag>title|replace|avoid)\s+(?P<value>.+?)(?=\s+-(?:title|replace|avoid|noseason)(?:\s|$)|\s*$)',
     re.IGNORECASE | re.DOTALL,
 )
+# Matches standalone -noseason flag (no value)
+_NOSEASON_RE = re.compile(r'(?i)(?:^|\s)-noseason(?:\s|$)')
 
 
 def parse_args(args_text: str) -> ParsedArgs:
@@ -79,11 +84,17 @@ def parse_args(args_text: str) -> ParsedArgs:
 
     source = remaining.strip() or None
 
+    no_season = bool(_NOSEASON_RE.search(args_text))
+    # Remove -noseason from remaining so it isn't treated as source
+    remaining = _NOSEASON_RE.sub(' ', remaining).strip()
+    source = remaining or None
+
     return ParsedArgs(
         source=source,
         title=title,
         replacements=replacements,
         avoid_keywords=avoid_keywords,
+        no_season=no_season,
     )
 
 

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import anitopy
 
-from config import SEASON_EPISODE_PATTERNS, FILENAME_TEMPLATE, FILENAME_TEMPLATE_NO_SEASON
+from config import SEASON_EPISODE_PATTERNS, FILENAME_TEMPLATE, FILENAME_TEMPLATE_NO_SEASON, FILENAME_TEMPLATE_EP_ONLY
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ def build_filename(
     filename: str,
     user_settings: Optional[Dict[str, Any]] = None,
     replacements: Optional[list] = None,
+    no_season: bool = False,
 ) -> str:
     # Apply -replace substitutions BEFORE regex so patterns can match
     # the adjusted filename (e.g. 'Act II Second Season' → 'S04').
@@ -106,6 +107,13 @@ def build_filename(
     season, episode = extract_season_episode(filename, user_settings)
 
     # Resolve templates
+    # -noseason flag → always use ep-only template regardless of what was parsed
+    if no_season:
+        if episode is None:
+            stem = os.path.splitext(os.path.basename(filename))[0]
+            return f"{title} - {stem}.mkv"
+        return FILENAME_TEMPLATE_EP_ONLY.format(title=title, episode=episode)
+
     if user_settings and user_settings.get("rename_template"):
         from bot.utils.user_settings import get_rename_templates
         tmpl_season, tmpl_no_season = get_rename_templates(user_settings)
