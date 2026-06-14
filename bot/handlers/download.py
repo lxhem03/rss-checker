@@ -27,7 +27,8 @@ _USAGE = (
     "  <code>-replace original:replacement</code>  (repeatable)\n"
     "  <code>-avoid keyword1,keyword2</code>\n\n"
     "💡 <b>Tip:</b> If a <code>.torrent</code> URL returns a timeout error, "
-    "use the magnet link instead — it bypasses the download server entirely."
+    "use the magnet link instead — it bypasses the download server entirely.\n\n"
+    "  <code>-noseason</code>  — use episode-only filename (e.g. One Piece - E1100.mkv)"
 )
 
 
@@ -76,4 +77,5 @@ def register(app: Client) -> None:
             torrent_file_id=torrent_file_id,
             replacements=args.replacements,
             avoid_keywords=[],
+            no_season=args.no_season,
         )

@@ -35,7 +35,8 @@ _USAGE = (
     "<b>Examples:</b>\n"
     "<code>/rssfeed https://nyaa.si/... -title Diamond no Ace "
     "-replace Act II Second Season:S04</code>\n"
-    "<code>/rssfeed https://nyaa.si/... -title Yozakura -avoid REPACK,v2</code>"
+    "<code>/rssfeed https://nyaa.si/... -title Yozakura -avoid REPACK,v2</code>\n"
+    "<code>/rssfeed https://nyaa.si/... -title One Piece -noseason</code>"
 )
 
 
@@ -102,6 +103,7 @@ def register(app: Client) -> None:
             # ── Stored per-feed so they apply on every future check ───────
             "replacements":   [[o, r] for o, r in args.replacements],
             "avoid_keywords": args.avoid_keywords,
+            "no_season":      args.no_season,
         }
         await db.feeds.insert_one(doc)
 
@@ -113,6 +115,8 @@ def register(app: Client) -> None:
         if args.avoid_keywords:
             kws = ", ".join(f"<code>{k}</code>" for k in args.avoid_keywords)
             extra += f"\n🚫 <b>Avoid:</b> {kws}"
+        if args.no_season:
+            extra += f"\n🔢 <b>No Season:</b> episode-only filenames"
 
         await status.edit_text(
             f"✅ <b>RSS feed added!</b>\n\n"
