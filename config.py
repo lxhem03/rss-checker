@@ -134,6 +134,7 @@ SEASON_EPISODE_PATTERNS = [
 # ─────────────────────────────────────────
 FILENAME_TEMPLATE: str = "{title} - S{season:02d}E{episode:02d}.mkv"
 FILENAME_TEMPLATE_NO_SEASON: str = "{title} - S01E{episode:02d}.mkv"
+FILENAME_TEMPLATE_EP_ONLY:   str = "{title} - E{episode:02d}.mkv"
 
 # Koyeb injects $PORT automatically; we default to 8080 for local dev.
 # Set this to whatever port your Koyeb service is configured to expose.
