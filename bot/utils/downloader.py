@@ -22,7 +22,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from pyrogram import Client
 from pyrogram.types import Message
@@ -57,6 +57,14 @@ class DownloadJob:
     from_rss: bool = False
     no_season: bool = False
     replacements: List[Tuple[str, str]] = field(default_factory=list)
+    # Called once the job finishes, with a single bool arg:
+    #   True  → job is "done" (succeeded, or had nothing to do, or was
+    #           manually cancelled by a user) — caller should treat the
+    #           source entry as permanently handled.
+    #   False → job failed with a real error — caller should treat the
+    #           entry as still "pending" so it gets retried later
+    #           (e.g. RSS checker will re-discover it on the next poll).
+    on_complete: Optional[Callable[[bool], Awaitable[None]]] = None
     progress: float = 0.0
     speed: str = "0 B/s"
     eta: str = "∞"
@@ -84,6 +92,7 @@ class DownloadManager:
         replacements: Optional[List[Tuple[str, str]]] = None,
         avoid_keywords: Optional[List[str]] = None,   # accepted but not used here
         no_season: bool = False,
+        on_complete: Optional[Callable[[bool], Awaitable[None]]] = None,
     ) -> str:
         job_id = uuid.uuid4().hex[:8]
         job = DownloadJob(
@@ -96,6 +105,7 @@ class DownloadManager:
             from_rss=from_rss,
             no_season=no_season,
             replacements=replacements or [],
+            on_complete=on_complete,
         )
         self._jobs[job_id] = job
 
@@ -133,6 +143,13 @@ class DownloadManager:
         async with self._semaphore:
             job_dir = os.path.join(DOWNLOAD_DIR, job.id)
             os.makedirs(job_dir, exist_ok=True)
+
+            # Tracks the final outcome so the on_complete callback (used by
+            # the RSS checker to decide whether to mark the entry "seen")
+            # gets an accurate signal even with multiple early-return paths
+            # below. Default is "error" — only flipped to something else
+            # on an explicit success/no-op/cancel path.
+            outcome = ["error"]
 
             try:
                 user_settings: Dict[str, Any] = await client.db.get_settings(job.user_id)
@@ -240,6 +257,7 @@ class DownloadManager:
                 video_files = sorted(raw_videos, key=_ep_key)
 
                 if not video_files:
+                    outcome[0] = "no_files"   # terminal — nothing to retry
                     await _safe_edit(
                         status_msg,
                         f"⚠️ <b>No video files found</b> in torrent <code>{job.id}</code>.",
@@ -296,7 +314,12 @@ class DownloadManager:
                         f"✅ Done — {uploaded} uploaded, {skipped} already existed (skipped).",
                     )
 
+                # Reached the natural end of the try block — job is done.
+                outcome[0] = "success"
+
             except asyncio.CancelledError:
+                # User manually cancelled — respect that, don't auto-retry.
+                outcome[0] = "cancelled"
                 await _safe_edit(status_msg, f"🛑 <b>Cancelled:</b> <code>{job.id}</code>")
             except Exception as exc:
                 logger.exception("Job %s failed", job.id)
@@ -307,6 +330,20 @@ class DownloadManager:
             finally:
                 shutil.rmtree(job_dir, ignore_errors=True)
                 self._jobs.pop(job.id, None)
+
+                # ── Notify caller of final outcome ─────────────────────
+                # "error" is the only outcome that should be retried later
+                # (e.g. RSS checker re-discovering the entry on next poll).
+                # Everything else ("success", "no_files", "cancelled") is
+                # considered permanently handled.
+                if job.on_complete:
+                    mark_done = outcome[0] != "error"
+                    try:
+                        await job.on_complete(mark_done)
+                    except Exception:
+                        logger.exception(
+                            "on_complete callback failed for job %s", job.id
+                        )
 
 
 async def _upload_one(
