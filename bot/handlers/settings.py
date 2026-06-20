@@ -378,7 +378,6 @@ def register(app: Client) -> None:
             await db.update_setting(uid, key, ids)
             _AWAITING.pop(uid, None)
 
-            # Reload settings and go back to the channel sub-page
             s = await db.get_settings(uid)
             if state == _DUMP_SET:
                 await _go_to_dump(bot_msg, s)
