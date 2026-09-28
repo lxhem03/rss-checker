@@ -25,6 +25,7 @@ from bot.handlers import register_handlers
 from bot.tasks.rss_checker import RssCheckerTask
 from bot.utils.downloader import DownloadManager
 from bot.utils.health import start_health_server
+from bot.utils.torrent import Aria2Manager
 from database import Database
 
 logging.basicConfig(
@@ -42,6 +43,11 @@ async def main() -> None:
     # Starts immediately so the platform sees the port open within its
     # startup timeout, even before the bot connects to Telegram.
     await start_health_server(HEALTH_CHECK_PORT)
+
+    # ── aria2c daemon (torrent/magnet downloads) ────────────────────────────
+    # Started once here so it's ready before the first RSS check or /download
+    # ever runs. See bot/utils/torrent.py for why aria2c instead of libtorrent.
+    await Aria2Manager.start()
 
     # ── Database ──────────────────────────────────────────────────────────
     db = Database()
@@ -80,7 +86,10 @@ async def main() -> None:
         loop_name = type(asyncio.get_event_loop()).__name__
         logger.info("✅ Bot is live. Event loop: %s | Health port: %d",
                     loop_name, HEALTH_CHECK_PORT)
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await Aria2Manager.stop()
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ MAX_CONCURRENT_TRANSMISSIONS: int = int(
     os.environ.get("MAX_CONCURRENT_TRANSMISSIONS", "100")
 )
 
-# libtorrent session upload/download rate limits (bytes/sec, 0 = unlimited)
+# aria2c overall upload/download rate limits (bytes/sec, 0 = unlimited)
 MAX_DOWNLOAD_RATE: int = int(os.environ.get("MAX_DOWNLOAD_RATE", "0"))
 MAX_UPLOAD_RATE: int = int(os.environ.get("MAX_UPLOAD_RATE", "0"))
 

@@ -2,7 +2,12 @@
 #  RSS Torrent Bot — Dockerfile
 #  Compatible with: Koyeb, Heroku (container stack), Railway, Render, VPS
 #  Base: python:3.11-slim (Debian Bookworm)
-#  Extras: ffmpeg, mediainfo, libtorrent-rasterbar (via apt)
+#  Extras: ffmpeg, mediainfo, aria2 (via apt)
+#
+#  Torrent downloads use aria2c (WZML-X's method) instead of embedded
+#  libtorrent — aria2c is a lightweight standalone binary driven over local
+#  JSON-RPC, which is the proven-safe approach for Heroku dynos. See
+#  bot/utils/torrent.py for details.
 # ─────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim AS base
@@ -18,7 +23,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         mediainfo \
-        python3-libtorrent \
+        aria2 \
         build-essential \
         curl \
     && rm -rf /var/lib/apt/lists/*
