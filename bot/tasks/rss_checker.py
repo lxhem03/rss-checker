@@ -32,6 +32,7 @@ import feedparser
 from config import RSS_CHECK_INTERVAL, RSS_FETCH_WORKERS, AUTH_GROUPS
 from database import Database
 from bot.utils.arg_parser import should_avoid
+from bot.utils.feed_fetch import fetch_feed_sync
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +102,12 @@ class RssCheckerTask:
             logger.warning("%d feed check(s) raised exceptions", len(errors))
 
     async def _fetch_feed(self, feed_url: str) -> feedparser.FeedParserDict:
+        # NOTE: uses fetch_feed_sync (httpx + explicit timeout), NOT
+        # feedparser.parse(url) directly — see bot/utils/feed_fetch.py
+        # for why: an untimed fetch can hang a worker thread forever
+        # and eventually stall the whole checker.
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, feedparser.parse, feed_url)
+        return await loop.run_in_executor(self._executor, fetch_feed_sync, feed_url)
 
     async def _check_feed(self, feed: dict) -> None:
         feed_url:       str  = feed["feed_url"]
