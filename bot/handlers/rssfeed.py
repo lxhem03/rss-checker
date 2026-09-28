@@ -16,13 +16,12 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-import feedparser
-
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from .auth import group_only
 from bot.utils.arg_parser import parse_args
+from bot.utils.feed_fetch import fetch_feed_sync
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +73,11 @@ def register(app: Client) -> None:
         status = await message.reply_text("⏳ Fetching feed to snapshot current entries…", quote=True)
 
         try:
+            # fetch_feed_sync (httpx + timeout) instead of feedparser.parse()
+            # directly — an untimed fetch can hang the executor thread
+            # forever on a slow/dead feed URL. See bot/utils/feed_fetch.py.
             parsed = await asyncio.get_event_loop().run_in_executor(
-                None, feedparser.parse, args.source
+                None, fetch_feed_sync, args.source
             )
         except Exception as exc:
             await status.edit_text(f"❌ Could not fetch feed:\n<code>{exc}</code>")
