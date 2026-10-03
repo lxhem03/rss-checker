@@ -21,6 +21,7 @@ If episode number can't be parsed, take the first entry in feed order
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -307,36 +308,53 @@ class RssCheckerTask:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+_MAGNET_IN_HTML_RE = re.compile(r'magnet:\?[^\s"\'<>]+')
+
+
 def _extract_torrent_link(entry: dict) -> Optional[str]:
     """
     Extract torrent URL or magnet from a feedparser entry.
-    Prefers magnet links over .torrent URLs to avoid Nyaa 504 errors
-    on the direct download endpoint under load.
+    Prefers magnet links over .torrent URLs to avoid 504 errors on
+    direct torrent-download endpoints under load (Nyaa's included).
+
+    Not every provider shapes its RSS the same way as Nyaa:
+      - Nyaa: magnet via the nyaa:magnetLink extension tag; .torrent
+        URLs literally end in ".torrent".
+      - AnimeTosho: the "torrent" enclosure URL does NOT end in
+        ".torrent" (e.g. .../download/<id>/torrent) — identified by
+        its `type="application/x-bittorrent"` instead — and the
+        magnet link isn't an enclosure/<link> at all, it's only a
+        plain <a href="magnet:..."> inside the HTML <description>.
+    So this checks enclosure MIME type as well as URL suffix, and
+    falls back to scanning the description's HTML for an embedded
+    magnet link.
     """
-    magnet   = None
+    magnet      = None
     dot_torrent = None
 
-    # Nyaa RSS extension tag — most reliable magnet source
+    # Nyaa RSS extension tag — most reliable magnet source when present
     nyaa_magnet = entry.get("nyaa_magnetlink", "")
     if nyaa_magnet:
         magnet = nyaa_magnet
 
     for enc in entry.get("enclosures", []):
-        href = enc.get("href") or enc.get("url", "")
+        href     = enc.get("href") or enc.get("url", "")
+        enc_type = (enc.get("type") or "").lower()
         if not href:
             continue
         if href.startswith("magnet:") and not magnet:
             magnet = href
-        elif _is_torrent(href) and not dot_torrent:
+        elif (_is_torrent(href) or enc_type == "application/x-bittorrent") and not dot_torrent:
             dot_torrent = href
 
     for lnk in entry.get("links", []):
-        href = lnk.get("href", "")
+        href     = lnk.get("href", "")
+        lnk_type = (lnk.get("type") or "").lower()
         if not href:
             continue
         if href.startswith("magnet:") and not magnet:
             magnet = href
-        elif _is_torrent(href) and not dot_torrent:
+        elif (_is_torrent(href) or lnk_type == "application/x-bittorrent") and not dot_torrent:
             dot_torrent = href
 
     link = entry.get("link", "")
@@ -346,7 +364,18 @@ def _extract_torrent_link(entry: dict) -> Optional[str]:
         elif _is_torrent(link) and not dot_torrent:
             dot_torrent = link
 
-    # Prefer magnet — bypasses Nyaa's 504-prone .torrent download endpoint
+    # Fallback: some providers (e.g. AnimeTosho) only embed the magnet
+    # as a plain <a href="magnet:..."> inside the HTML description.
+    if not magnet:
+        desc = entry.get("summary") or entry.get("description") or ""
+        if desc:
+            m = _MAGNET_IN_HTML_RE.search(desc)
+            if m:
+                # CDATA/HTML content can carry literal "&amp;" instead
+                # of "&" between magnet params — decode before use.
+                magnet = html.unescape(m.group(0))
+
+    # Prefer magnet — bypasses 504-prone direct torrent-download endpoints
     return magnet or dot_torrent
 
 
