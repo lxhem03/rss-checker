@@ -83,7 +83,14 @@ def _build_flags() -> List[str]:
         "--bt-max-peers=0",
         "--bt-max-open-files=1000",
         "--bt-request-peer-speed-limit=1M",
-        "--seed-ratio=0",
+        # NOTE: seed-ratio=0 does NOT mean "don't seed" — per aria2's own
+        # docs it means "ignore the share-ratio limit, seed forever" since
+        # there's no seed-time paired with it. That bug is exactly why
+        # finished downloads sat at 100% / 0 B/s and never reported
+        # "complete" — this bot only leeches, so seed-time=0 (stop
+        # seeding immediately once the download itself is done) is the
+        # flag that actually does what was intended here.
+        "--seed-time=0",
         "--peer-id-prefix=-qB5220-",
         "--peer-agent=qBittorrent/5.2.2",
         # Lets a plain magnet/.torrent-URL added via addUri automatically
